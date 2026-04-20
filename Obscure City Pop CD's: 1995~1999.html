@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obscure City Pop CD's: 1995~1999</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0a0a0a;color:#e0e0e0;font-family:"Segoe UI",system-ui,sans-serif;
+     display:flex;height:100vh;overflow:hidden}
+
+/* ── Grid side ── */
+#grid-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+
+#toolbar{padding:11px 14px;background:#111;border-bottom:1px solid #1e1e1e;
+         display:flex;align-items:center;gap:10px;flex-shrink:0}
+#toolbar h1{font-size:.9rem;font-weight:700;color:#fff;letter-spacing:.04em;
+            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+#search{flex:1;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;
+        color:#e0e0e0;padding:6px 11px;font-size:.82rem;outline:none}
+#search:focus{border-color:#444}
+#search::placeholder{color:#444}
+#count{font-size:.72rem;color:#444;white-space:nowrap}
+
+#grid-wrap{flex:1;overflow-y:auto;padding:10px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:7px}
+
+/* ── Album card ── */
+.card{position:relative;cursor:pointer;border-radius:5px;overflow:hidden;
+      aspect-ratio:1;background:#1a1a1a;transition:transform .15s,box-shadow .15s}
+.card:hover{transform:scale(1.05);box-shadow:0 6px 24px rgba(0,0,0,.7);z-index:2}
+.card.active{outline:2px solid #fff;transform:scale(1.05)}
+.card img{width:100%;height:100%;object-fit:cover;display:block}
+.card .no-cover{width:100%;height:100%;display:flex;align-items:center;
+               justify-content:center;font-size:1.8rem;color:#333}
+
+.rank{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.78);
+      color:#fff;font-size:.6rem;font-weight:700;padding:2px 5px;
+      border-radius:3px;line-height:1.4}
+
+.hover-info{position:absolute;bottom:0;left:0;right:0;
+            background:linear-gradient(transparent,rgba(0,0,0,.9));
+            padding:20px 6px 6px;opacity:0;transition:opacity .15s}
+.card:hover .hover-info{opacity:1}
+.hi-artist{font-size:.58rem;color:#aaa;white-space:nowrap;
+           overflow:hidden;text-overflow:ellipsis}
+.hi-album{font-size:.68rem;font-weight:600;color:#fff;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── Detail side ── */
+#detail{width:320px;min-width:280px;background:#111;
+        border-left:1px solid #1e1e1e;display:flex;
+        flex-direction:column;overflow:hidden;flex-shrink:0}
+#d-placeholder{flex:1;display:flex;align-items:center;justify-content:center;
+               color:#2a2a2a;font-size:.9rem}
+
+#d-cover-wrap{width:100%;aspect-ratio:1;overflow:hidden;
+              background:#1a1a1a;flex-shrink:0}
+#d-cover{width:100%;height:100%;object-fit:cover;display:block}
+#d-cover-none{width:100%;height:100%;display:flex;align-items:center;
+              justify-content:center;font-size:4rem;color:#222}
+
+#d-info{padding:12px 14px 10px;border-bottom:1px solid #1e1e1e;flex-shrink:0}
+#d-rank{font-size:.65rem;font-weight:700;color:#555;
+        letter-spacing:.07em;text-transform:uppercase;margin-bottom:3px}
+#d-artist{font-size:.8rem;color:#888;margin-bottom:3px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#d-album{font-size:1rem;font-weight:700;color:#fff;line-height:1.3}
+
+#d-actions{padding:8px 14px 10px;border-bottom:1px solid #1e1e1e;flex-shrink:0}
+#d-yt-btn{display:inline-flex;align-items:center;gap:6px;
+          background:#c00;color:#fff;border:none;border-radius:5px;
+          padding:6px 14px;font-size:.78rem;font-weight:600;
+          cursor:pointer;text-decoration:none}
+#d-yt-btn:hover{background:#e00}
+.no-yt{color:#333;font-size:.78rem}
+
+#d-player-wrap{flex:1;display:flex;flex-direction:column;background:#000}
+#d-player{width:100%;aspect-ratio:16/9;border:none;flex-shrink:0}
+#d-no-video{padding:20px;color:#2a2a2a;font-size:.8rem;text-align:center}
+
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#222;border-radius:2px}
+</style>
+</head>
+<body>
+
+<div id="grid-panel">
+  <div id="toolbar">
+    <h1>Obscure City Pop CD's: 1995~1999</h1>
+    <input id="search" type="text" placeholder="Buscar artista o álbum…" autocomplete="off">
+    <span id="count"></span>
+  </div>
+  <div id="grid-wrap"><div id="grid"></div></div>
+</div>
+
+<div id="detail">
+  <div id="d-placeholder">← Selecciona un álbum</div>
+</div>
+
+<script>
+let ALL = [], current = -1;
+
+fetch("Obscure City Pop CD's: 1995~1999.json")
+  .then(r => r.json())
+  .then(data => { ALL = data; render(data); });
+
+function esc(s) {
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function render(data) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  document.getElementById("count").textContent = data.length + " álbumes";
+  data.forEach(a => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.rank = a.rank;
+    const img = a.cover
+      ? `<img src="${esc(a.cover)}" loading="lazy" alt="" onerror="this.style.display='none'">`
+      : `<div class="no-cover">🎵</div>`;
+    card.innerHTML = img
+      + `<div class="rank">#${a.rank}</div>`
+      + `<div class="hover-info">`
+      + `<div class="hi-artist">${esc(a.artist)}</div>`
+      + `<div class="hi-album">${esc(a.album)}</div>`
+      + `</div>`;
+    card.addEventListener("click", () => select(a, card));
+    grid.appendChild(card);
+  });
+}
+
+function select(a, cardEl) {
+  current = a.rank;
+  document.querySelectorAll(".card").forEach(c => c.classList.remove("active"));
+  if (cardEl) { cardEl.classList.add("active"); cardEl.scrollIntoView({block:"nearest"}); }
+
+  const cover = a.cover
+    ? `<img id="d-cover" src="${esc(a.cover)}" alt="">`
+    : `<div id="d-cover-none">🎵</div>`;
+
+  const ytBtn = a.youtube
+    ? `<a id="d-yt-btn" href="${esc(a.youtube)}" target="_blank">▶ Abrir en YouTube</a>`
+    : `<span class="no-yt">Sin enlace de YouTube</span>`;
+
+  const player = a.embed
+    ? `<iframe id="d-player" src="${esc(a.embed)}" allowfullscreen allow="encrypted-media"></iframe>`
+    : `<div id="d-no-video">Sin vídeo disponible</div>`;
+
+  document.getElementById("detail").innerHTML =
+    `<div id="d-cover-wrap">${cover}</div>`
+    + `<div id="d-info">`
+    +   `<div id="d-rank">Puesto #${a.rank}</div>`
+    +   `<div id="d-artist">${esc(a.artist)}</div>`
+    +   `<div id="d-album">${esc(a.album)}</div>`
+    + `</div>`
+    + `<div id="d-actions">${ytBtn}</div>`
+    + `<div id="d-player-wrap">${player}</div>`;
+}
+
+// Search
+document.getElementById("search").addEventListener("input", e => {
+  const q = e.target.value.trim().toLowerCase();
+  render(q ? ALL.filter(a =>
+    a.artist.toLowerCase().includes(q) || a.album.toLowerCase().includes(q)) : ALL);
+});
+
+// Keyboard navigation (← → or ↑ ↓)
+document.addEventListener("keydown", e => {
+  if (document.activeElement === document.getElementById("search")) return;
+  if (!["ArrowRight","ArrowLeft","ArrowDown","ArrowUp"].includes(e.key)) return;
+  e.preventDefault();
+  const cards = [...document.querySelectorAll(".card")];
+  if (!cards.length) return;
+  const idx = cards.findIndex(c => +c.dataset.rank === current);
+  const next = (e.key === "ArrowRight" || e.key === "ArrowDown")
+    ? Math.min(idx + 1, cards.length - 1)
+    : Math.max(idx - 1, 0);
+  const card = cards[next];
+  const rank = +card.dataset.rank;
+  select(ALL.find(a => a.rank === rank), card);
+});
+</script>
+</body>
+</html>
