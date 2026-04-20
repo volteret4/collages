@@ -1,0 +1,9 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: Gitleaks (detección de secretos)
+        description: Detecta secretos hardcoded en tu código antes de commitear.
+        entry: gitleaks protect --verbose --redact --staged
+        language: system
