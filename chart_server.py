@@ -10,7 +10,11 @@ from urllib.parse import urlparse, unquote, urlencode
 import requests
 import sopsdotenv
 
-sopsdotenv.load_sops_env()
+try:
+    sopsdotenv.load_sops_env()
+except FileNotFoundError:
+    # En Docker las variables llegan ya descifradas vía docker-compose (scripts/up.sh)
+    print("Aviso: no se encontró .encrypted.env; usando variables de entorno ya exportadas")
 
 LASTFM_API_KEY  = os.environ.get('LASTFM_API_KEY', '')
 DISCOGS_TOKEN   = os.environ.get('DISCOGS_TOKEN', '')

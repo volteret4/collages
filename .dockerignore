@@ -1,0 +1,4 @@
+.git
+__pycache__
+*.pyc
+yt_credentials
