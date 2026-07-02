@@ -272,7 +272,7 @@ HTML = r"""<!DOCTYPE html>
 <link rel="stylesheet" href="/theme-palettes.css">
 <title>Chart Viewer</title>
 <style>
-:root, [data-theme="og"] {
+[data-theme="og"], :root:not([data-theme]) {
   --bg: #0a0a0a;
   --surface: #111111;
   --surface-2: #1a1a1a;
