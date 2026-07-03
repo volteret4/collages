@@ -25,6 +25,71 @@ SCRIPT       = os.path.join(DATA_DIR, 'yt-chart.py')
 REGISTRY     = os.path.join(DATA_DIR, 'chart_registry.json')
 _SKIP_NAMES  = {'charts_orpheus', 'chart_registry'}
 
+# ── Panel de configuración (⚙) ───────────────────────────────────────────────
+# Mismo patrón que el resto de apps.
+SETTINGS_ENV_PATH = os.path.join(DATA_DIR, '.env')
+SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
+VARS_SPEC = [
+    {"name": "LASTFM_API_KEY", "secret": True, "help": "API key de Last.fm"},
+    {"name": "DISCOGS_TOKEN", "secret": True, "help": "Token de Discogs"},
+]
+_HAS_SECRETS = any(v.get("secret") for v in VARS_SPEC)
+
+
+def _read_env_file(path):
+    values = {}
+    if not os.path.exists(path):
+        return values
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            values[k.strip()] = v
+    return values
+
+
+def _write_env_file(path, updates):
+    lines = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    seen = set()
+    out = []
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s:
+            k = s.split("=", 1)[0].strip()
+            if k in updates:
+                out.append(f"{k}={updates[k]}\n")
+                seen.add(k)
+                continue
+        out.append(line)
+    for k, v in updates.items():
+        if k not in seen:
+            if out and not out[-1].endswith("\n"):
+                out[-1] += "\n"
+            out.append(f"{k}={v}\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(out)
+
+
+def _current_value(spec):
+    file_vals = _read_env_file(SETTINGS_ENV_PATH)
+    if spec["name"] in file_vals:
+        return file_vals[spec["name"]]
+    return os.environ.get(spec["name"], spec.get("default", ""))
+
+
+def _check_auth(password):
+    if not SETTINGS_PASSWORD:
+        return not _HAS_SECRETS
+    return password == SETTINGS_PASSWORD
+
 _job      = {'running': False, 'id': None, 'last_name': None, 'error': None, 'done': False, 'log': ''}
 _job_lock = threading.Lock()
 
@@ -749,6 +814,7 @@ fetchInput.addEventListener('keydown', e => { if (e.key === 'Enter') startFetch(
 loadList();
 </script>
 <script src="/theme-picker.js"></script>
+<script src="/settings-panel.js"></script>
 </body>
 </html>"""
 
@@ -782,6 +848,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/theme-picker.js':
             with open(os.path.join(DATA_DIR, 'theme-picker.js'), 'rb') as f:
+                self._send(f.read(), 'application/javascript; charset=utf-8'); return
+
+        if path == '/settings-panel.js':
+            with open(os.path.join(DATA_DIR, 'settings-panel.js'), 'rb') as f:
                 self._send(f.read(), 'application/javascript; charset=utf-8'); return
 
         if path == '/api/list':
@@ -835,6 +905,31 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': 'collage_id requerido'}, 400); return
             threading.Thread(target=_run_fetch, args=(cid,), daemon=True).start()
             self._json({'ok': True}); return
+
+        if path == '/api/settings':
+            password = d.get('password') or ''
+            requires = bool(SETTINGS_PASSWORD) or _HAS_SECRETS
+            authorized = _check_auth(password)
+            if requires and not authorized:
+                error = "Contraseña incorrecta" if password else None
+                if not SETTINGS_PASSWORD:
+                    error = "Este servicio tiene credenciales pero no hay SETTINGS_PASSWORD configurada. Añádela al .env y reinicia el contenedor."
+                self._json({"requires_password": True, "authorized": False, "error": error}); return
+            vars_out = [
+                {"name": v["name"], "value": _current_value(v), "secret": v["secret"], "help": v.get("help", "")}
+                for v in VARS_SPEC
+            ]
+            self._json({"requires_password": requires, "authorized": True, "vars": vars_out}); return
+
+        if path == '/api/settings/save':
+            if not _check_auth(d.get('password') or ''):
+                self._json({"error": "Contraseña incorrecta"}, 403); return
+            known = {v["name"] for v in VARS_SPEC}
+            updates = {k: v for k, v in (d.get("values") or {}).items() if k in known}
+            if not updates:
+                self._json({"error": "Nada que guardar"}, 400); return
+            _write_env_file(SETTINGS_ENV_PATH, updates)
+            self._json({"ok": True, "message": "Guardado. Reinicia el contenedor para aplicar los cambios."}); return
 
         self._json({'error': 'Unknown endpoint'}, 404)
 
