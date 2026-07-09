@@ -89,7 +89,7 @@ def init_db():
 # -------------------------
 
 def api_call(params, _retries=5):
-    headers = {"Authorization": API_KEY}
+    headers = {"Authorization": f"token {API_KEY}"}
 
     for attempt in range(_retries):
         r = requests.get(URL, params=params, headers=headers)
