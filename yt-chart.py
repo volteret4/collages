@@ -7,7 +7,12 @@ import sopsdotenv
 import os
 import argparse
 
-sopsdotenv.load_sops_env()
+try:
+    sopsdotenv.load_sops_env()
+except FileNotFoundError:
+    # En Docker las variables llegan ya descifradas vía docker-compose (scripts/up.sh);
+    # no hay .encrypted.env ni binario `sops` instalado en la imagen.
+    pass
 
 DB = "charts_orpheus.db"
 URL = "https://orpheus.network/ajax.php"
