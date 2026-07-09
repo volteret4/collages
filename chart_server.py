@@ -32,6 +32,7 @@ SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
 VARS_SPEC = [
     {"name": "LASTFM_API_KEY", "secret": True, "help": "API key de Last.fm"},
     {"name": "DISCOGS_TOKEN", "secret": True, "help": "Token de Discogs"},
+    {"name": "ORPHEUS_API_KEY", "secret": True, "help": "API key de Orpheus (necesaria para obtener collages)"},
 ]
 _HAS_SECRETS = any(v.get("secret") for v in VARS_SPEC)
 
