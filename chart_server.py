@@ -496,6 +496,48 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+/* ── Responsive: tablet (≤768px) ── */
+@media (max-width: 768px) {
+  body{flex-direction:column;height:auto;min-height:100vh;overflow-y:auto;overflow-x:hidden}
+
+  #sidebar{width:100%;min-width:0;max-height:220px;border-right:none;border-bottom:1px solid var(--border)}
+  #sb-list{max-height:130px}
+
+  #main{overflow:visible}
+  #grid-panel{overflow:visible}
+  #grid-wrap{overflow:visible;max-height:none}
+
+  #detail{width:280px;min-width:0}
+
+  /* Bigger tap targets */
+  .col-item{min-height:44px;padding:11px 14px}
+  #fetch-id,#fetch-btn{min-height:44px}
+  #fetch-btn{padding:10px 14px}
+  .d-btn{min-height:44px;padding:10px 14px}
+  .d-expand{min-height:44px;display:flex;align-items:center}
+  #search{min-height:40px}
+}
+
+/* ── Responsive: phone (≤480px) ── */
+@media (max-width: 480px) {
+  #main{flex-direction:column;overflow:visible}
+
+  #grid-panel{width:100%}
+  #grid-wrap{padding:8px}
+  #grid{grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:5px}
+
+  #detail{width:100%;min-width:0;border-left:none;border-top:1px solid var(--border);max-height:none}
+
+  #toolbar{flex-wrap:wrap;row-gap:8px;padding:10px}
+  #col-title{max-width:100%;white-space:normal}
+  #search{width:100%;flex:1 1 100%}
+  #grid-count{width:100%}
+
+  #fetch-row{flex-wrap:wrap}
+  #fetch-id{width:100%;flex:1 1 100%}
+  #fetch-btn{width:100%}
+}
 </style>
 </head>
 <body>
