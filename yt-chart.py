@@ -329,6 +329,18 @@ def discogs_youtube_url(artist, album):
 # MusicBrainz / Cover Art Archive (portada de respaldo)
 # -------------------------
 
+def cover_ok(url):
+    """True if the URL actually serves an image (many hotlinks on ptpimg/redacted are dead)."""
+    if not url:
+        return False
+    try:
+        with requests.get(url, stream=True, timeout=8,
+                          headers={"User-Agent": "Mozilla/5.0"}) as r:
+            return r.ok and r.headers.get("content-type", "").startswith("image")
+    except Exception:
+        return False
+
+
 def musicbrainz_cover(artist, album):
     """Return a Cover Art Archive URL for the best matching release group, or None."""
     def q(s):
@@ -513,11 +525,15 @@ def main():
         artist_id = get_or_create_artist(a["artist"])
         album_id, yt, stored_cover = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
 
-        if not a["cover"]:
-            a["cover"] = stored_cover or musicbrainz_cover(a["artist"], a["album"])
-            if a["cover"] and not stored_cover:
-                print(f"  ↳ Portada MusicBrainz: {a['cover']}")
-                update_cover(album_id, a["cover"])
+        cover = a["cover"] or stored_cover
+        if not cover_ok(cover):
+            mb_cover = musicbrainz_cover(a["artist"], a["album"])
+            if mb_cover:
+                print(f"  ↳ Portada MusicBrainz: {mb_cover}")
+                cover = mb_cover
+        a["cover"] = cover
+        if cover != stored_cover:
+            update_cover(album_id, cover)
 
         if not yt:
             yt_url, yt_id = discogs_youtube_url(a["artist"], a["album"])
