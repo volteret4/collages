@@ -375,11 +375,13 @@ def search_youtube(artist, album):
 
     # Construimos el comando como lo harías en la terminal
     # --dump-single-json nos devuelve la info en formato JSON para leerla fácil
+    # --flat-playlist: id y duración salen de la propia búsqueda, sin extraer
+    # cada vídeo (más rápido y sin necesitar runtime JS para YouTube)
     command = [
         "yt-dlp",
         f"ytsearch5:{query}",
         "--dump-single-json",
-        "--no-playlist",
+        "--flat-playlist",
         "--quiet"
     ]
 
@@ -392,7 +394,7 @@ def search_youtube(artist, album):
             for v in data["entries"]:
                 # Verificamos si el video dura más de 20 minutos (1200 seg)
                 if v.get("duration") and v["duration"] > 1200:
-                    return v["webpage_url"], v["id"]
+                    return f"https://www.youtube.com/watch?v={v['id']}", v["id"]
 
     except Exception as e:
         print(f"Error al ejecutar yt-dlp del sistema: {e}")

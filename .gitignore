@@ -7,3 +7,4 @@
 *.csv*
 **/.csv*
 **/__pycache__/
+data/

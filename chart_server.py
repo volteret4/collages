@@ -20,14 +20,17 @@ LASTFM_API_KEY  = os.environ.get('LASTFM_API_KEY', '')
 DISCOGS_TOKEN   = os.environ.get('DISCOGS_TOKEN', '')
 
 PORT         = 8745
-DATA_DIR     = os.path.dirname(os.path.abspath(__file__))
-SCRIPT       = os.path.join(DATA_DIR, 'yt-chart.py')
+APP_DIR      = os.path.dirname(os.path.abspath(__file__))
+# Charts, registro y BD; en Docker apunta a un volumen para que persistan
+DATA_DIR     = os.environ.get('CHARTS_DATA_DIR') or APP_DIR
+os.makedirs(DATA_DIR, exist_ok=True)
+SCRIPT       = os.path.join(APP_DIR, 'yt-chart.py')
 REGISTRY     = os.path.join(DATA_DIR, 'chart_registry.json')
 _SKIP_NAMES  = {'charts_orpheus', 'chart_registry'}
 
 # ── Panel de configuración (⚙) ───────────────────────────────────────────────
 # Mismo patrón que el resto de apps.
-SETTINGS_ENV_PATH = os.path.join(DATA_DIR, '.env')
+SETTINGS_ENV_PATH = os.path.join(APP_DIR, '.env')
 SETTINGS_PASSWORD = os.environ.get('SETTINGS_PASSWORD', '')
 VARS_SPEC = [
     {"name": "LASTFM_API_KEY", "secret": True, "help": "API key de Last.fm"},
@@ -1006,15 +1009,15 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == '/theme-palettes.css':
-            with open(os.path.join(DATA_DIR, 'theme-palettes.css'), 'rb') as f:
+            with open(os.path.join(APP_DIR, 'theme-palettes.css'), 'rb') as f:
                 self._send(f.read(), 'text/css; charset=utf-8'); return
 
         if path == '/theme-picker.js':
-            with open(os.path.join(DATA_DIR, 'theme-picker.js'), 'rb') as f:
+            with open(os.path.join(APP_DIR, 'theme-picker.js'), 'rb') as f:
                 self._send(f.read(), 'application/javascript; charset=utf-8'); return
 
         if path == '/settings-panel.js':
-            with open(os.path.join(DATA_DIR, 'settings-panel.js'), 'rb') as f:
+            with open(os.path.join(APP_DIR, 'settings-panel.js'), 'rb') as f:
                 self._send(f.read(), 'application/javascript; charset=utf-8'); return
 
         if path == '/api/list':
