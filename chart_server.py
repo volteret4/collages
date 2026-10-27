@@ -162,6 +162,7 @@ def read_collage(name):
 
 
 def _run_fetch(collage_id):
+    # collage_id: ID numérico de collage o URL (collage o búsqueda de torrents.php)
     with _job_lock:
         _job.update(running=True, id=collage_id, last_name=None,
                     error=None, done=False, log='')
@@ -171,7 +172,8 @@ def _run_fetch(collage_id):
 
     try:
         proc = subprocess.run(
-            [sys.executable, SCRIPT, '--id', str(collage_id)],
+            [sys.executable, SCRIPT,
+             '--url' if str(collage_id).startswith('http') else '--id', str(collage_id)],
             capture_output=True, text=True, cwd=DATA_DIR
         )
         log = (proc.stdout + proc.stderr).strip()
@@ -546,9 +548,9 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
   <div id="sb-head"><h1><span>▶</span> Chart Viewer</h1></div>
   <div id="sb-list"></div>
   <div id="sb-fetch">
-    <label>Obtener collage</label>
+    <label>Obtener collage o búsqueda</label>
     <div id="fetch-row">
-      <input id="fetch-id" type="number" placeholder="ID del collage…">
+      <input id="fetch-id" type="text" placeholder="ID de collage o URL de búsqueda…">
       <button id="fetch-btn">Obtener</button>
     </div>
     <div id="job-status"></div>
@@ -822,10 +824,11 @@ function setStatus(msg, cls) {
 
 async function startFetch() {
   const id = fetchInput.value.trim();
-  if (!id || isNaN(+id)) { setStatus('Introduce un ID válido', 'err'); return; }
+  const isUrl = /^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id);
+  if (!id || (!isUrl && isNaN(+id))) { setStatus('Introduce un ID o URL válida', 'err'); return; }
   fetchBtn.disabled = true;
   setStatus('Iniciando…', 'running');
-  const r = await api('/api/fetch', {collage_id: +id});
+  const r = await api('/api/fetch', {collage_id: isUrl ? id : +id});
   if (r.error) { setStatus(r.error, 'err'); fetchBtn.disabled = false; return; }
   pollJob();
 }
@@ -946,6 +949,8 @@ class Handler(BaseHTTPRequestHandler):
             cid = d.get('collage_id')
             if not cid:
                 self._json({'error': 'collage_id requerido'}, 400); return
+            if isinstance(cid, str) and not cid.startswith('https://orpheus.network/'):
+                self._json({'error': 'URL no válida'}, 400); return
             threading.Thread(target=_run_fetch, args=(cid,), daemon=True).start()
             self._json({'ok': True}); return
 

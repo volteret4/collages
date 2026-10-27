@@ -6,6 +6,8 @@ import subprocess
 import sopsdotenv
 import os
 import argparse
+import html
+from urllib.parse import urlparse, parse_qsl
 
 try:
     sopsdotenv.load_sops_env()
@@ -201,6 +203,88 @@ def get_collage(COLLAGE_ID):
     return collage_name, all_albums
 
 # -------------------------
+# Gazelle BROWSE (búsqueda personalizada)
+# -------------------------
+
+# Parámetros del formulario web que no son filtros de búsqueda
+_SEARCH_SKIP_PARAMS = {"action", "searchsubmit", "page", "id", "torrentid"}
+
+_RELEASE_TYPES = {
+    "1": "Album", "3": "Soundtrack", "5": "EP", "6": "Anthology",
+    "7": "Compilation", "9": "Single", "11": "Live album", "13": "Remix",
+    "14": "Bootleg", "15": "Interview", "16": "Mixtape", "17": "Demo",
+    "18": "Concert Recording", "19": "DJ Mix", "21": "Unknown",
+}
+
+# Campos de texto que dan nombre a la búsqueda, por orden de relevancia
+_SEARCH_NAME_FIELDS = [
+    "searchstr", "artistname", "groupname", "remasterrecordlabel", "recordlabel",
+    "remastercataloguenumber", "cataloguenumber", "remastertitle", "remasteryear",
+    "year", "taglist", "filelist",
+]
+
+
+def search_params_from_url(url):
+    """Extrae los filtros de una URL de torrents.php para usarlos con action=browse."""
+    params = {k: v for k, v in parse_qsl(urlparse(url).query)
+              if k not in _SEARCH_SKIP_PARAMS and v != ""}
+    # La web usa order/sort; el API clásico de Gazelle order_by/order_way
+    if "order" in params:
+        params.setdefault("order_by", params["order"])
+    if "sort" in params:
+        params.setdefault("order_way", params["sort"])
+    return params
+
+
+def search_name(params):
+    parts = [params[k] for k in _SEARCH_NAME_FIELDS if params.get(k)]
+    rtype = _RELEASE_TYPES.get(params.get("releasetype", ""))
+    if rtype:
+        parts.append(rtype)
+    name = " · ".join(parts) or "Búsqueda"
+    # El nombre se usa como nombre de fichero
+    return re.sub(r'[/\\]', "-", name)
+
+
+def get_search(url):
+    params = search_params_from_url(url)
+    all_albums = []
+    current_page = 1
+    total_pages  = None
+
+    while True:
+        print(f"Descargando página {current_page}" +
+              (f"/{total_pages}" if total_pages else "") + "…")
+
+        data = api_call({**params, "action": "browse", "page": current_page})
+
+        if current_page == 1:
+            total_pages = int(data.get("pages") or 1)
+            print(f"Total páginas: {total_pages}")
+
+        results = data.get("results", [])
+        if not results:
+            break
+
+        for g in results:
+            all_albums.append({
+                "rank":     len(all_albums) + 1,
+                "artist":   html.unescape(g.get("artist") or "Unknown Artist"),
+                "album":    html.unescape(g.get("groupName") or "Unknown Album"),
+                "cover":    g.get("cover") or None,
+                "group_id": g.get("groupId"),
+            })
+
+        if current_page >= total_pages:
+            break
+
+        current_page += 1
+        time.sleep(4)
+
+    return search_name(params), all_albums
+
+
+# -------------------------
 # Discogs video lookup
 # -------------------------
 
@@ -349,12 +433,28 @@ def main():
     init_db()
     parser = argparse.ArgumentParser(description="mustdiscover — comparación entre usuarios")
     parser.add_argument("--id",           type=int)
+    parser.add_argument("--url",          help="URL de collage o de búsqueda (torrents.php?...)")
 
     args = parser.parse_args()
 
     COLLAGE_ID = (args.id)
+    if args.url:
+        m = re.search(r"collages\.php\?(?:.*&)?id=(\d+)", args.url)
+        if m:
+            COLLAGE_ID = int(m.group(1))
+        elif "torrents.php" not in args.url:
+            parser.error("La URL debe ser de collages.php o torrents.php")
+    elif COLLAGE_ID is None:
+        parser.error("Indica --id o --url")
 
-    collage_name, albums = get_collage(COLLAGE_ID)
+    if COLLAGE_ID is not None:
+        collage_name, albums = get_collage(COLLAGE_ID)
+        slug       = f"collage-{COLLAGE_ID}"
+        source_url = f"https://orpheus.network/collages.php?id={COLLAGE_ID}"
+    else:
+        collage_name, albums = get_search(args.url)
+        slug       = "search"
+        source_url = args.url
 
     # Usamos un context manager (with) para asegurar que se cierre y guarde
     with db() as con:
@@ -367,11 +467,7 @@ def main():
         cur.execute("""
             INSERT OR REPLACE INTO collections (id, slug, name, source_url)
             VALUES (1, ?, ?, ?)
-        """, (
-            f"collage-{COLLAGE_ID}",
-            collage_name,
-            f"https://orpheus.network/collages.php?id={COLLAGE_ID}"
-        ))
+        """, (slug, collage_name, source_url))
         con.commit()
 
     # Ahora que la conexión de arriba está cerrada, el bucle puede trabajar
