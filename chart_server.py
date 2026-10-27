@@ -4,7 +4,7 @@ chart_server.py — Orpheus chart viewer
 Run: python chart_server.py
 Open: http://localhost:8745
 """
-import os, json, glob, subprocess, sys, threading
+import os, re, json, glob, subprocess, sys, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, urlencode
 import requests
@@ -91,7 +91,8 @@ def _check_auth(password):
         return not _HAS_SECRETS
     return password == SETTINGS_PASSWORD
 
-_job      = {'running': False, 'id': None, 'last_name': None, 'error': None, 'done': False, 'log': ''}
+_job      = {'running': False, 'id': None, 'last_name': None, 'error': None, 'done': False, 'log': '',
+             'name': None, 'page': None, 'pages': None, 'total': None, 'processed': 0, 'current': None}
 _job_lock = threading.Lock()
 
 
@@ -161,22 +162,53 @@ def read_collage(name):
         return json.load(f)
 
 
+_RE_PAGE  = re.compile(r'Descargando página (\d+)(?:/(\d+))?')
+_RE_NAME  = re.compile(r'Nombre: (.+)$')
+_RE_TOTAL = re.compile(r'Total álbumes: (\d+)')
+_RE_ALBUM = re.compile(r'^(\d+)\. (.+)$')
+_LOG_TAIL = 200
+
+
+def _parse_progress(line):
+    """Actualiza _job según las líneas que imprime yt-chart.py (llamar con _job_lock)."""
+    if m := _RE_PAGE.search(line):
+        _job.update(page=int(m.group(1)), pages=int(m.group(2)) if m.group(2) else _job['pages'])
+    elif m := _RE_NAME.match(line):
+        _job['name'] = m.group(1)
+    elif m := _RE_TOTAL.match(line):
+        _job['total'] = int(m.group(1))
+    elif m := _RE_ALBUM.match(line):
+        _job.update(processed=int(m.group(1)), current=m.group(2))
+
+
 def _run_fetch(collage_id):
     # collage_id: ID numérico de collage o URL (collage o búsqueda de torrents.php)
     with _job_lock:
         _job.update(running=True, id=collage_id, last_name=None,
-                    error=None, done=False, log='')
+                    error=None, done=False, log='', name=None, page=None,
+                    pages=None, total=None, processed=0, current=None)
 
     # Snapshot JSON files before fetch to detect the new one
     before = {os.path.basename(f) for f in glob.glob(os.path.join(DATA_DIR, '*.json'))}
 
     try:
-        proc = subprocess.run(
-            [sys.executable, SCRIPT,
+        # -u: sin buffer, para ir leyendo el progreso en vivo
+        proc = subprocess.Popen(
+            [sys.executable, '-u', SCRIPT,
              '--url' if str(collage_id).startswith('http') else '--id', str(collage_id)],
-            capture_output=True, text=True, cwd=DATA_DIR
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=DATA_DIR
         )
-        log = (proc.stdout + proc.stderr).strip()
+        lines = []
+        for line in proc.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            lines.append(line)
+            with _job_lock:
+                _parse_progress(line)
+                _job['log'] = '\n'.join(lines[-_LOG_TAIL:])
+        proc.wait()
+        log = '\n'.join(lines[-_LOG_TAIL:])
 
         # Find newly created JSON file
         after    = {os.path.basename(f) for f in glob.glob(os.path.join(DATA_DIR, '*.json'))}
@@ -495,6 +527,30 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .d-ext-link{font-size:.72rem;color:var(--accent-2);text-decoration:none}
 .d-ext-link:hover{text-decoration:underline}
 
+/* ── Cuadro flotante de progreso ── */
+#job-float{position:fixed;right:.8rem;bottom:3.2rem;width:330px;max-width:calc(100vw - 32px);
+           background:var(--surface);border:1px solid var(--border);border-radius:8px;
+           box-shadow:0 10px 34px rgba(0,0,0,.6);z-index:9000;padding:11px 13px 12px;
+           display:flex;flex-direction:column;gap:7px;font-size:.75rem}
+#job-float[hidden]{display:none}
+#jf-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#jf-title{font-weight:700;color:var(--text);font-size:.8rem}
+#jf-title.done{color:var(--success)}
+#jf-title.err{color:var(--danger)}
+#jf-close{background:none;border:none;color:var(--text-muted);font-size:1.1rem;cursor:pointer;
+          line-height:1;padding:0 2px}
+#jf-close:hover{color:var(--text)}
+#jf-name{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#jf-phase{color:var(--text-muted);display:flex;justify-content:space-between;gap:8px}
+#jf-bar{height:5px;background:var(--surface-2);border-radius:3px;overflow:hidden}
+#jf-fill{height:100%;width:0;background:var(--accent);transition:width .4s}
+#jf-fill.done{background:var(--success)}
+#jf-fill.err{background:var(--danger)}
+#jf-current{color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:1.2em}
+#jf-log{background:var(--bg);border:1px solid var(--border);border-radius:5px;color:var(--text-muted);
+        font:.66rem/1.45 ui-monospace,monospace;padding:6px 8px;max-height:96px;overflow:hidden;
+        white-space:pre-wrap;word-break:break-word;margin:0}
+
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
@@ -539,6 +595,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
   #fetch-row{flex-wrap:wrap}
   #fetch-id{width:100%;flex:1 1 100%}
   #fetch-btn{width:100%}
+
+  #job-float{left:16px;right:16px;width:auto;max-width:none}
 }
 </style>
 </head>
@@ -555,6 +613,15 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
     </div>
     <div id="job-status"></div>
   </div>
+</div>
+
+<div id="job-float" hidden>
+  <div id="jf-head"><span id="jf-title"></span><button id="jf-close" title="Cerrar">×</button></div>
+  <div id="jf-name"></div>
+  <div id="jf-phase"><span id="jf-phase-txt"></span><span id="jf-pct"></span></div>
+  <div id="jf-bar"><div id="jf-fill"></div></div>
+  <div id="jf-current"></div>
+  <pre id="jf-log"></pre>
 </div>
 
 <div id="main">
@@ -822,6 +889,51 @@ function setStatus(msg, cls) {
   statusEl.textContent = msg;
 }
 
+// ── Cuadro flotante de progreso ───────────────────────────────────────────────
+const jobFloat = document.getElementById('job-float');
+let floatDismissed = false, floatHideTimer = null;
+
+document.getElementById('jf-close').addEventListener('click', () => {
+  floatDismissed = true;
+  jobFloat.hidden = true;
+});
+
+function updateFloat(s) {
+  if (floatDismissed) return;
+  clearTimeout(floatHideTimer);
+  jobFloat.hidden = false;
+
+  const state = s.running ? '' : s.done ? 'done' : s.error ? 'err' : '';
+  const title = document.getElementById('jf-title');
+  title.className   = state;
+  title.textContent = s.running ? '⏳ Añadiendo…' : s.done ? '✓ Completado' : s.error ? '✗ Error' : '';
+
+  document.getElementById('jf-name').textContent = s.name || s.last_name || String(s.id ?? '');
+
+  let phase = 'Iniciando…', pct = null;
+  if (s.total != null) {
+    phase = `Álbumes: ${s.processed || 0} / ${s.total}`;
+    pct   = s.total ? (s.processed || 0) / s.total : 1;
+  } else if (s.page) {
+    phase = `Descargando página ${s.page}${s.pages ? ' / ' + s.pages : ''}`;
+    pct   = s.pages ? s.page / s.pages * 0.1 : null;  // la descarga de páginas es ~10% del trabajo
+  }
+  if (s.done) pct = 1;
+  document.getElementById('jf-phase-txt').textContent = phase;
+  document.getElementById('jf-pct').textContent = pct != null ? Math.round(pct * 100) + '%' : '';
+  const fill = document.getElementById('jf-fill');
+  fill.className   = state;
+  fill.style.width = (pct != null ? pct * 100 : 0) + '%';
+
+  document.getElementById('jf-current').textContent =
+    s.error ? s.error.split('\n').pop() : (s.current ? '♪ ' + s.current : '');
+
+  const log = document.getElementById('jf-log');
+  log.textContent = (s.log || '').split('\n').slice(-6).join('\n');
+
+  if (s.done) floatHideTimer = setTimeout(() => { jobFloat.hidden = true; }, 8000);
+}
+
 async function startFetch() {
   const id = fetchInput.value.trim();
   const isUrl = /^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id);
@@ -830,6 +942,8 @@ async function startFetch() {
   setStatus('Iniciando…', 'running');
   const r = await api('/api/fetch', {collage_id: isUrl ? id : +id});
   if (r.error) { setStatus(r.error, 'err'); fetchBtn.disabled = false; return; }
+  floatDismissed = false;
+  updateFloat({running: true, id: isUrl ? id : +id});
   pollJob();
 }
 
@@ -837,6 +951,7 @@ function pollJob() {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
     const s = await api('/api/job');
+    updateFloat(s);
     if (s.running) {
       setStatus('⏳ Descargando… ' + (s.log ? s.log.split('\n').pop() : ''), 'running');
       pollJob();
@@ -850,7 +965,7 @@ function pollJob() {
     } else {
       fetchBtn.disabled = false;
     }
-  }, 2000);
+  }, 1000);
 }
 
 fetchBtn.addEventListener('click', startFetch);
@@ -858,6 +973,8 @@ fetchInput.addEventListener('keydown', e => { if (e.key === 'Enter') startFetch(
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 loadList();
+// Si se recarga la página con una descarga en curso, retomar el seguimiento
+api('/api/job').then(s => { if (s.running) { fetchBtn.disabled = true; pollJob(); } });
 </script>
 <script src="/theme-picker.js"></script>
 <script src="/settings-panel.js"></script>

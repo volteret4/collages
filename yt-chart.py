@@ -25,6 +25,7 @@ API_KEY       = os.environ.get("ORPHEUS_API_KEY")
 DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 _DISC_HEADERS = {"User-Agent": "ChartViewer/1.0",
                  "Authorization": f"Discogs token={DISCOGS_TOKEN}"}
+_MB_HEADERS   = {"User-Agent": "ChartViewer/1.0 ( https://github.com/volteret4/collages )"}
 
 
 # -------------------------
@@ -325,6 +326,33 @@ def discogs_youtube_url(artist, album):
 
 
 # -------------------------
+# MusicBrainz / Cover Art Archive (portada de respaldo)
+# -------------------------
+
+def musicbrainz_cover(artist, album):
+    """Return a Cover Art Archive URL for the best matching release group, or None."""
+    def q(s):
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        r = requests.get("https://musicbrainz.org/ws/2/release-group/",
+                         params={"query": f'releasegroup:"{q(album)}" AND artist:"{q(artist)}"',
+                                 "fmt": "json", "limit": 5},
+                         headers=_MB_HEADERS, timeout=10)
+        time.sleep(1)  # MusicBrainz: máx. 1 petición/s
+        if not r.ok:
+            return None
+        for rg in r.json().get("release-groups", []):
+            if rg.get("score", 0) < 90:
+                break
+            url = f"https://coverartarchive.org/release-group/{rg['id']}/front-500"
+            if requests.head(url, headers=_MB_HEADERS, timeout=10, allow_redirects=True).ok:
+                return url
+    except Exception as e:
+        print(f"MusicBrainz lookup error: {e}")
+    return None
+
+
+# -------------------------
 # YouTube
 # -------------------------
 
@@ -387,7 +415,7 @@ def get_or_create_album(artist_id, name, group_id=None):
     cur = con.cursor()
 
     cur.execute("""
-        SELECT id, youtube_url FROM albums
+        SELECT id, youtube_url, cover_url FROM albums
         WHERE artist_id=? AND name=?
     """, (artist_id, name))
 
@@ -408,7 +436,14 @@ def get_or_create_album(artist_id, name, group_id=None):
     con.commit()
     album_id = cur.lastrowid
     con.close()
-    return album_id, None
+    return album_id, None, None
+
+
+def update_cover(album_id, cover):
+    con = db()
+    con.execute("UPDATE albums SET cover_url=? WHERE id=?", (cover, album_id))
+    con.commit()
+    con.close()
 
 
 def update_album(album_id, yt_url, yt_id, cover):
@@ -456,6 +491,9 @@ def main():
         slug       = "search"
         source_url = args.url
 
+    print(f"Nombre: {collage_name}")
+    print(f"Total álbumes: {len(albums)}")
+
     # Usamos un context manager (with) para asegurar que se cierre y guarde
     with db() as con:
         cur = con.cursor()
@@ -473,7 +511,13 @@ def main():
     # Ahora que la conexión de arriba está cerrada, el bucle puede trabajar
     for a in albums:
         artist_id = get_or_create_artist(a["artist"])
-        album_id, yt = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
+        album_id, yt, stored_cover = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
+
+        if not a["cover"]:
+            a["cover"] = stored_cover or musicbrainz_cover(a["artist"], a["album"])
+            if a["cover"] and not stored_cover:
+                print(f"  ↳ Portada MusicBrainz: {a['cover']}")
+                update_cover(album_id, a["cover"])
 
         if not yt:
             yt_url, yt_id = discogs_youtube_url(a["artist"], a["album"])
