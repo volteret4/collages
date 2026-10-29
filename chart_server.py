@@ -4,7 +4,7 @@ chart_server.py — Orpheus chart viewer
 Run: python chart_server.py
 Open: http://localhost:8745
 """
-import os, re, json, glob, subprocess, sys, threading, time, unicodedata
+import os, re, json, glob, sqlite3, subprocess, sys, threading, time, unicodedata
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, urlencode
 import requests
@@ -25,6 +25,8 @@ QB_HOST         = os.environ.get('QB_HOST', '')
 QB_PORT         = os.environ.get('QB_PORT', '8080')
 QB_USER         = os.environ.get('QB_USER', '')
 QB_PASS         = os.environ.get('QB_PASS', '')
+# lastfm_stats.db de lastfm-scrobbles (Last.fm + ListenBrainz), solo lectura
+LASTFM_DB       = os.environ.get('LASTFM_DB', '')
 
 PORT         = 8745
 APP_DIR      = os.path.dirname(os.path.abspath(__file__))
@@ -379,12 +381,12 @@ def enrich(artist, album):
         return {'lastfm': lfm_f.result(), 'discogs': disc_f.result()}
 
 
-# ── Biblioteca propia (Airsonic + qBittorrent) ───────────────────────────────
+# ── Biblioteca propia (Airsonic + qBittorrent) y escuchas (Last.fm) ──────────
 # Misma idea que ya_lo_tengo.py de dieta_sonora: un álbum "lo tengo" si está en
 # Airsonic o hay un torrent en qBittorrent con artista y título en el nombre.
 
 _LIB_TTL   = 600
-_lib_cache = {'t': 0, 'airsonic': None, 'qb': None}
+_lib_cache = {'t': 0, 'airsonic': None, 'qb': None, 'lastfm': None}
 _lib_lock  = threading.Lock()
 
 
@@ -433,11 +435,44 @@ def _qb_torrents():
         return None
 
 
+def _lastfm_plays():
+    """({(artista, álbum): (escuchas, último ts)}, {artista: escuchas}) normalizados, o None."""
+    if not (LASTFM_DB and os.path.exists(LASTFM_DB)):
+        return None
+    try:
+        # immutable=1: el volumen está montado :ro y la BD va en modo WAL
+        con = sqlite3.connect(f'file:{LASTFM_DB}?mode=ro&immutable=1', uri=True)
+        albums, artists = {}, {}
+        for ar, al, n, ts in con.execute("""
+                SELECT ar.name, al.name, COUNT(*), MAX(s.ts) FROM scrobbles s
+                JOIN albums al  ON al.album_id  = s.album_id
+                JOIN artists ar ON ar.artist_id = al.artist_id
+                GROUP BY al.album_id"""):
+            key = (_norm(ar), _norm(al))
+            prev = albums.get(key, (0, 0))
+            albums[key] = (prev[0] + n, max(prev[1], ts or 0))
+        for ar, n in con.execute("""
+                SELECT ar.name, COUNT(*) FROM scrobbles s
+                JOIN artists ar ON ar.artist_id = s.artist_id
+                GROUP BY s.artist_id"""):
+            artists[_norm(ar)] = artists.get(_norm(ar), 0) + n
+        con.close()
+        return albums, artists
+    except Exception as e:
+        print(f'Last.fm DB no disponible: {e}')
+        return None
+
+
 def _library(refresh=False):
     with _lib_lock:
         if refresh or time.time() - _lib_cache['t'] > _LIB_TTL:
-            _lib_cache.update(t=time.time(), airsonic=_airsonic_albums(), qb=_qb_torrents())
-        return _lib_cache['airsonic'], _lib_cache['qb']
+            _lib_cache.update(t=time.time(), airsonic=_airsonic_albums(), qb=_qb_torrents(),
+                              lastfm=_lastfm_plays())
+        return _lib_cache['airsonic'], _lib_cache['qb'], _lib_cache['lastfm']
+
+
+def _album_match(nb, fb):
+    return nb == fb or (len(nb) >= 4 and nb in fb) or (len(fb) >= 4 and fb in nb)
 
 
 def _artist_match(a, b):
@@ -445,10 +480,10 @@ def _artist_match(a, b):
 
 
 def owned_in_collage(name, refresh=False):
-    """{rank: ['airsonic', 'qbittorrent']} de los álbumes del chart que ya tengo."""
+    """Para cada rank del chart: dónde lo tengo (Airsonic/qBittorrent) y cuánto lo he escuchado."""
     data = read_collage(name) or []
-    airsonic, qb = _library(refresh)
-    owned = {}
+    airsonic, qb, lastfm = _library(refresh)
+    owned, listened, artist_plays = {}, {}, {}
     for a in data:
         na, nb = _norm(a.get('artist')), _norm(a.get('album'))
         if not nb:
@@ -460,7 +495,23 @@ def owned_in_collage(name, refresh=False):
             where.append('qbittorrent')
         if where:
             owned[a.get('rank')] = where
-    return {'owned': owned, 'sources': {'airsonic': airsonic is not None, 'qbittorrent': qb is not None}}
+        if lastfm:
+            lfm_albums, lfm_artists = lastfm
+            plays, last = 0, 0
+            for (fa, fb), (n, ts) in lfm_albums.items():
+                if _artist_match(na, fa) and _album_match(nb, fb):
+                    plays, last = plays + n, max(last, ts)
+            if plays:
+                listened[a.get('rank')] = {
+                    'plays': plays,
+                    'last': time.strftime('%Y-%m-%d', time.gmtime(last)) if last else None,
+                }
+            ap = sum(n for fa, n in lfm_artists.items() if _artist_match(na, fa))
+            if ap:
+                artist_plays[a.get('rank')] = ap
+    return {'owned': owned, 'listened': listened, 'artist_plays': artist_plays,
+            'sources': {'airsonic': airsonic is not None, 'qbittorrent': qb is not None,
+                        'lastfm': lastfm is not None}}
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
@@ -559,15 +610,21 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
           justify-content:center;font-size:2rem;color:var(--border)}
 .rank{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.78);
       color:var(--text);font-size:.58rem;font-weight:700;padding:2px 5px;border-radius:3px}
-.owned-badge{position:absolute;top:4px;right:4px;background:var(--success);color:#000;
+.badges{position:absolute;top:4px;right:4px;display:flex;gap:3px;align-items:center}
+.lfm-badge{background:var(--accent-2);color:#000;font-size:.56rem;font-weight:800;height:17px;
+           padding:0 5px;border-radius:9px;display:flex;align-items:center;
+           box-shadow:0 1px 4px rgba(0,0,0,.6)}
+.owned-badge{background:var(--success);color:#000;
              font-size:.6rem;font-weight:800;width:17px;height:17px;border-radius:50%;
              display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.6)}
 .owned-badge.qb{background:var(--warning)}
 .card.owned img{opacity:.55}
-#owned-toggle{font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:4px;
+#owned-toggle,#listened-toggle{font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:4px;
               white-space:nowrap;cursor:pointer;user-select:none}
-#owned-toggle[hidden]{display:none}
+#owned-toggle[hidden],#listened-toggle[hidden]{display:none}
 #d-owned{font-size:.7rem;color:var(--success);margin-top:5px;font-weight:600}
+#d-listened{font-size:.7rem;color:var(--accent-2);margin-top:3px;font-weight:600}
+#d-listened.never{color:var(--text-muted);font-weight:400}
 .hover-info{position:absolute;bottom:0;left:0;right:0;
             background:linear-gradient(transparent,rgba(0,0,0,.92));
             padding:18px 5px 5px;opacity:0;transition:opacity .15s}
@@ -741,6 +798,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
       <input id="search" type="text" placeholder="Buscar artista o álbum…" autocomplete="off">
       <label id="owned-toggle" hidden title="Ocultar los que ya están en Airsonic o qBittorrent">
         <input id="hide-owned" type="checkbox"> Ocultar los que tengo</label>
+      <label id="listened-toggle" hidden title="Ocultar los que ya has escuchado según Last.fm / ListenBrainz">
+        <input id="hide-listened" type="checkbox"> Ocultar escuchados</label>
       <span id="grid-count"></span>
     </div>
     <div id="grid-wrap" style="display:none"><div id="grid"></div></div>
@@ -755,7 +814,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 </div>
 
 <script>
-let ALL = [], current = -1, pollTimer = null, OWNED = {};
+let ALL = [], current = -1, pollTimer = null, OWNED = {}, LISTENED = {}, ARTIST_PLAYS = {};
 const OWNED_LABEL = {airsonic: 'Airsonic', qbittorrent: 'qBittorrent'};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -805,8 +864,9 @@ async function loadCollage(name, sidebarEl) {
   document.getElementById('detail').innerHTML =
     '<div id="d-placeholder">← Selecciona un álbum</div>';
 
-  OWNED = {};
+  OWNED = {}; LISTENED = {}; ARTIST_PLAYS = {};
   document.getElementById('owned-toggle').hidden = true;
+  document.getElementById('listened-toggle').hidden = true;
   render(ALL);
   loadOwned(name);
 }
@@ -816,26 +876,32 @@ async function loadOwned(name) {
   let r;
   try { r = await api('/api/owned/' + encodeURIComponent(name)); } catch (e) { return; }
   if (!r || r.error || document.getElementById('col-title').textContent !== name) return;
-  OWNED = r.owned || {};
-  document.getElementById('owned-toggle').hidden = !Object.keys(OWNED).length;
+  OWNED        = r.owned || {};
+  LISTENED     = r.listened || {};
+  ARTIST_PLAYS = r.artist_plays || {};
+  document.getElementById('owned-toggle').hidden    = !Object.keys(OWNED).length;
+  document.getElementById('listened-toggle').hidden = !Object.keys(LISTENED).length;
   applyFilter();
 }
 
 function applyFilter() {
   const q    = document.getElementById('search').value.trim().toLowerCase();
   const hide = document.getElementById('hide-owned').checked;
+  const hideL = document.getElementById('hide-listened').checked;
   render(ALL.filter(a =>
     (!q || (a.artist||'').toLowerCase().includes(q) || (a.album||'').toLowerCase().includes(q))
-    && !(hide && OWNED[a.rank])));
+    && !(hide && OWNED[a.rank]) && !(hideL && LISTENED[a.rank])));
 }
 
 // ── Render grid ───────────────────────────────────────────────────────────────
 function render(data) {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  const nOwned = ALL.filter(a => OWNED[a.rank]).length;
+  const nOwned    = ALL.filter(a => OWNED[a.rank]).length;
+  const nListened = ALL.filter(a => LISTENED[a.rank]).length;
   document.getElementById('grid-count').textContent =
-    data.length + ' álbumes' + (nOwned ? ` · ${nOwned} ya los tengo` : '');
+    data.length + ' álbumes' + (nOwned ? ` · ${nOwned} ya los tengo` : '')
+    + (nListened ? ` · ${nListened} escuchados` : '');
 
   data.forEach(a => {
     const card = document.createElement('div');
@@ -851,7 +917,11 @@ function render(data) {
     const badge = own
       ? `<div class="owned-badge${own.includes('airsonic') ? '' : ' qb'}" title="Ya lo tengo: ${own.map(o => OWNED_LABEL[o]).join(' + ')}">${own.includes('airsonic') ? '✓' : '↓'}</div>`
       : '';
-    card.innerHTML = img + badge
+    const lis = LISTENED[a.rank];
+    const lfmBadge = lis
+      ? `<div class="lfm-badge" title="${lis.plays} escuchas${lis.last ? ' · última: ' + lis.last : ''}">♫ ${lis.plays}</div>`
+      : '';
+    card.innerHTML = img + `<div class="badges">${lfmBadge}${badge}</div>`
       + `<div class="rank">#${a.rank ?? '?'}</div>`
       + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
       + `<div class="hi-album">${esc(a.album)}</div></div>`;
@@ -889,12 +959,23 @@ function select(a, cardEl) {
     + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${ALL.length}</div>`
     + `<div id="d-artist">${esc(a.artist)}</div><div id="d-album">${esc(a.album)}</div>`
     + (OWNED[a.rank] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.rank].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
+    + listenedLine(a.rank)
     + `</div>`
     + `<div id="d-link">${orpheusBtn}${ytBtn}</div>`
     + `<div id="d-player-wrap">${player}</div>`
     + `<div id="d-extra"><div class="d-loading">Cargando info…</div></div>`;
 
   enrichDetail(a.artist, a.album);
+}
+
+function listenedLine(rank) {
+  const lis = LISTENED[rank], ap = ARTIST_PLAYS[rank];
+  if (lis)
+    return `<div id="d-listened">♫ Escuchado ${lis.plays} ${lis.plays === 1 ? 'vez' : 'veces'}`
+      + (lis.last ? ` · última: ${lis.last}` : '') + `</div>`;
+  if (!Object.keys(LISTENED).length && !Object.keys(ARTIST_PLAYS).length) return '';
+  return `<div id="d-listened" class="never">Sin escuchas de este disco`
+    + (ap ? ` (del artista: ${ap})` : '') + `</div>`;
 }
 
 // ── Enrichment ────────────────────────────────────────────────────────────────
@@ -1000,6 +1081,7 @@ function toggleExpand(id, btn) {
 // ── Search ────────────────────────────────────────────────────────────────────
 document.getElementById('search').addEventListener('input', applyFilter);
 document.getElementById('hide-owned').addEventListener('change', applyFilter);
+document.getElementById('hide-listened').addEventListener('change', applyFilter);
 
 // ── Keyboard navigation ───────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
