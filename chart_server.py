@@ -4,7 +4,7 @@ chart_server.py — Orpheus chart viewer
 Run: python chart_server.py
 Open: http://localhost:8745
 """
-import os, re, json, glob, subprocess, sys, threading
+import os, re, json, glob, subprocess, sys, threading, time, unicodedata
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, urlencode
 import requests
@@ -18,6 +18,13 @@ except FileNotFoundError:
 
 LASTFM_API_KEY  = os.environ.get('LASTFM_API_KEY', '')
 DISCOGS_TOKEN   = os.environ.get('DISCOGS_TOKEN', '')
+AIRSONIC_URL    = os.environ.get('AIRSONIC_URL', '').rstrip('/')
+AIRSONIC_USER   = os.environ.get('AIRSONIC_USER', '')
+AIRSONIC_PASS   = os.environ.get('AIRSONIC_PASS', '')
+QB_HOST         = os.environ.get('QB_HOST', '')
+QB_PORT         = os.environ.get('QB_PORT', '8080')
+QB_USER         = os.environ.get('QB_USER', '')
+QB_PASS         = os.environ.get('QB_PASS', '')
 
 PORT         = 8745
 APP_DIR      = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +43,13 @@ VARS_SPEC = [
     {"name": "LASTFM_API_KEY", "secret": True, "help": "API key de Last.fm"},
     {"name": "DISCOGS_TOKEN", "secret": True, "help": "Token de Discogs"},
     {"name": "ORPHEUS_API_KEY", "secret": True, "help": "API key de Orpheus (necesaria para obtener collages)"},
+    {"name": "AIRSONIC_URL", "secret": False, "help": "URL de Airsonic (marca los álbumes que ya tienes)"},
+    {"name": "AIRSONIC_USER", "secret": False, "help": "Usuario de Airsonic"},
+    {"name": "AIRSONIC_PASS", "secret": True, "help": "Contraseña de Airsonic"},
+    {"name": "QB_HOST", "secret": False, "help": "Host de qBittorrent (en Docker: host.docker.internal)"},
+    {"name": "QB_PORT", "secret": False, "help": "Puerto de la WebUI de qBittorrent"},
+    {"name": "QB_USER", "secret": False, "help": "Usuario de qBittorrent"},
+    {"name": "QB_PASS", "secret": True, "help": "Contraseña de qBittorrent"},
 ]
 _HAS_SECRETS = any(v.get("secret") for v in VARS_SPEC)
 
@@ -365,6 +379,90 @@ def enrich(artist, album):
         return {'lastfm': lfm_f.result(), 'discogs': disc_f.result()}
 
 
+# ── Biblioteca propia (Airsonic + qBittorrent) ───────────────────────────────
+# Misma idea que ya_lo_tengo.py de dieta_sonora: un álbum "lo tengo" si está en
+# Airsonic o hay un torrent en qBittorrent con artista y título en el nombre.
+
+_LIB_TTL   = 600
+_lib_cache = {'t': 0, 'airsonic': None, 'qb': None}
+_lib_lock  = threading.Lock()
+
+
+def _norm(s):
+    """Minúsculas, sin acentos ni puntuación, espacios simples."""
+    s = unicodedata.normalize('NFD', s or '')
+    s = ''.join(c for c in s if unicodedata.category(c) != 'Mn').lower()
+    s = re.sub(r'[^\w]+', ' ', s.replace('&', ' and '))
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _airsonic_albums():
+    """[(artista, álbum)] normalizados de toda la biblioteca, o None si no está disponible."""
+    if not (AIRSONIC_URL and AIRSONIC_USER):
+        return None
+    out, offset = [], 0
+    try:
+        while True:
+            r = requests.get(AIRSONIC_URL + '/rest/getAlbumList2', timeout=15, params={
+                'u': AIRSONIC_USER, 'p': AIRSONIC_PASS, 'v': '1.15.0', 'c': 'charts_orpheus',
+                'f': 'json', 'type': 'alphabeticalByName', 'size': 500, 'offset': offset,
+            })
+            albums = r.json()['subsonic-response'].get('albumList2', {}).get('album', [])
+            out += [(_norm(a.get('artist')), _norm(a.get('name'))) for a in albums]
+            if len(albums) < 500:
+                return out
+            offset += 500
+    except Exception as e:
+        print(f'Airsonic no disponible: {e}')
+        return None
+
+
+def _qb_torrents():
+    """Nombres normalizados de los torrents, o None si qBittorrent no está disponible."""
+    if not QB_HOST:
+        return None
+    base = f'http://{QB_HOST}:{QB_PORT}/api/v2'
+    try:
+        sess = requests.Session()
+        sess.post(base + '/auth/login', data={'username': QB_USER, 'password': QB_PASS}, timeout=10)
+        r = sess.get(base + '/torrents/info', timeout=15)
+        r.raise_for_status()
+        return [_norm(t.get('name')) for t in r.json()]
+    except Exception as e:
+        print(f'qBittorrent no disponible: {e}')
+        return None
+
+
+def _library(refresh=False):
+    with _lib_lock:
+        if refresh or time.time() - _lib_cache['t'] > _LIB_TTL:
+            _lib_cache.update(t=time.time(), airsonic=_airsonic_albums(), qb=_qb_torrents())
+        return _lib_cache['airsonic'], _lib_cache['qb']
+
+
+def _artist_match(a, b):
+    return a == b or (len(a) >= 3 and len(b) >= 3 and (a in b or b in a))
+
+
+def owned_in_collage(name, refresh=False):
+    """{rank: ['airsonic', 'qbittorrent']} de los álbumes del chart que ya tengo."""
+    data = read_collage(name) or []
+    airsonic, qb = _library(refresh)
+    owned = {}
+    for a in data:
+        na, nb = _norm(a.get('artist')), _norm(a.get('album'))
+        if not nb:
+            continue
+        where = []
+        if airsonic and any(_artist_match(na, fa) and (nb == fb or nb in fb) for fa, fb in airsonic):
+            where.append('airsonic')
+        if qb and any(na in t and nb in t for t in qb):
+            where.append('qbittorrent')
+        if where:
+            owned[a.get('rank')] = where
+    return {'owned': owned, 'sources': {'airsonic': airsonic is not None, 'qbittorrent': qb is not None}}
+
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 HTML = r"""<!DOCTYPE html>
 <html lang="es">
@@ -461,6 +559,15 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
           justify-content:center;font-size:2rem;color:var(--border)}
 .rank{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.78);
       color:var(--text);font-size:.58rem;font-weight:700;padding:2px 5px;border-radius:3px}
+.owned-badge{position:absolute;top:4px;right:4px;background:var(--success);color:#000;
+             font-size:.6rem;font-weight:800;width:17px;height:17px;border-radius:50%;
+             display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+.owned-badge.qb{background:var(--warning)}
+.card.owned img{opacity:.55}
+#owned-toggle{font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:4px;
+              white-space:nowrap;cursor:pointer;user-select:none}
+#owned-toggle[hidden]{display:none}
+#d-owned{font-size:.7rem;color:var(--success);margin-top:5px;font-weight:600}
 .hover-info{position:absolute;bottom:0;left:0;right:0;
             background:linear-gradient(transparent,rgba(0,0,0,.92));
             padding:18px 5px 5px;opacity:0;transition:opacity .15s}
@@ -632,6 +739,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
     <div id="toolbar" style="display:none">
       <span id="col-title"></span>
       <input id="search" type="text" placeholder="Buscar artista o álbum…" autocomplete="off">
+      <label id="owned-toggle" hidden title="Ocultar los que ya están en Airsonic o qBittorrent">
+        <input id="hide-owned" type="checkbox"> Ocultar los que tengo</label>
       <span id="grid-count"></span>
     </div>
     <div id="grid-wrap" style="display:none"><div id="grid"></div></div>
@@ -646,7 +755,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 </div>
 
 <script>
-let ALL = [], current = -1, pollTimer = null;
+let ALL = [], current = -1, pollTimer = null, OWNED = {};
+const OWNED_LABEL = {airsonic: 'Airsonic', qbittorrent: 'qBittorrent'};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -695,14 +805,37 @@ async function loadCollage(name, sidebarEl) {
   document.getElementById('detail').innerHTML =
     '<div id="d-placeholder">← Selecciona un álbum</div>';
 
+  OWNED = {};
+  document.getElementById('owned-toggle').hidden = true;
   render(ALL);
+  loadOwned(name);
+}
+
+// ── Álbumes que ya tengo (Airsonic / qBittorrent) ─────────────────────────────
+async function loadOwned(name) {
+  let r;
+  try { r = await api('/api/owned/' + encodeURIComponent(name)); } catch (e) { return; }
+  if (!r || r.error || document.getElementById('col-title').textContent !== name) return;
+  OWNED = r.owned || {};
+  document.getElementById('owned-toggle').hidden = !Object.keys(OWNED).length;
+  applyFilter();
+}
+
+function applyFilter() {
+  const q    = document.getElementById('search').value.trim().toLowerCase();
+  const hide = document.getElementById('hide-owned').checked;
+  render(ALL.filter(a =>
+    (!q || (a.artist||'').toLowerCase().includes(q) || (a.album||'').toLowerCase().includes(q))
+    && !(hide && OWNED[a.rank])));
 }
 
 // ── Render grid ───────────────────────────────────────────────────────────────
 function render(data) {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  document.getElementById('grid-count').textContent = data.length + ' álbumes';
+  const nOwned = ALL.filter(a => OWNED[a.rank]).length;
+  document.getElementById('grid-count').textContent =
+    data.length + ' álbumes' + (nOwned ? ` · ${nOwned} ya los tengo` : '');
 
   data.forEach(a => {
     const card = document.createElement('div');
@@ -713,7 +846,12 @@ function render(data) {
       ? `<img src="${esc(a.cover)}" loading="lazy" alt="" onerror="this.style.display='none'">`
       : `<div class="no-cover">🎵</div>`;
 
-    card.innerHTML = img
+    const own = OWNED[a.rank];
+    if (own) card.classList.add('owned');
+    const badge = own
+      ? `<div class="owned-badge${own.includes('airsonic') ? '' : ' qb'}" title="Ya lo tengo: ${own.map(o => OWNED_LABEL[o]).join(' + ')}">${own.includes('airsonic') ? '✓' : '↓'}</div>`
+      : '';
+    card.innerHTML = img + badge
       + `<div class="rank">#${a.rank ?? '?'}</div>`
       + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
       + `<div class="hi-album">${esc(a.album)}</div></div>`;
@@ -749,7 +887,9 @@ function select(a, cardEl) {
   document.getElementById('detail').innerHTML =
     `<div id="d-cover-wrap">${cover}</div>`
     + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${ALL.length}</div>`
-    + `<div id="d-artist">${esc(a.artist)}</div><div id="d-album">${esc(a.album)}</div></div>`
+    + `<div id="d-artist">${esc(a.artist)}</div><div id="d-album">${esc(a.album)}</div>`
+    + (OWNED[a.rank] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.rank].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
+    + `</div>`
     + `<div id="d-link">${orpheusBtn}${ytBtn}</div>`
     + `<div id="d-player-wrap">${player}</div>`
     + `<div id="d-extra"><div class="d-loading">Cargando info…</div></div>`;
@@ -858,11 +998,8 @@ function toggleExpand(id, btn) {
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
-document.getElementById('search').addEventListener('input', e => {
-  const q = e.target.value.trim().toLowerCase();
-  render(q ? ALL.filter(a =>
-    (a.artist||'').toLowerCase().includes(q) || (a.album||'').toLowerCase().includes(q)) : ALL);
-});
+document.getElementById('search').addEventListener('input', applyFilter);
+document.getElementById('hide-owned').addEventListener('change', applyFilter);
 
 // ── Keyboard navigation ───────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
@@ -1039,6 +1176,13 @@ class Handler(BaseHTTPRequestHandler):
             data = read_collage(name)
             if data is None: self._json({'error': 'Not found'}, 404); return
             self._json(data); return
+
+        if path.startswith('/api/owned/'):
+            from urllib.parse import parse_qs
+            name = unquote(path[len('/api/owned/'):])
+            if read_collage(name) is None: self._json({'error': 'Not found'}, 404); return
+            refresh = parse_qs(urlparse(self.path).query).get('refresh', [''])[0] == '1'
+            self._json(owned_in_collage(name, refresh)); return
 
         if path == '/api/job':
             with _job_lock: status = dict(_job)
