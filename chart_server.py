@@ -523,6 +523,8 @@ HTML = r"""<!DOCTYPE html>
 <link rel="icon" type="image/svg" href="/books-svgrepo-com.svg" />
 <link rel="stylesheet" href="/theme-palettes.css">
 <title>Chart Viewer</title>
+<!-- Iconos Airsonic / qBittorrent / escuchado / Mix (servicio ya-lo-tengo) -->
+<script>(function(){var s=document.createElement('script');s.src=location.protocol+'//'+location.hostname+':8780/owned-badges.js';document.head.appendChild(s);})();</script>
 <style>
 [data-theme="og"], :root:not([data-theme]) {
   --bg: #0a0a0a;
@@ -611,13 +613,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .rank{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.78);
       color:var(--text);font-size:.58rem;font-weight:700;padding:2px 5px;border-radius:3px}
 .badges{position:absolute;top:4px;right:4px;display:flex;gap:3px;align-items:center}
-.lfm-badge{background:var(--accent-2);color:#000;font-size:.56rem;font-weight:800;height:17px;
-           padding:0 5px;border-radius:9px;display:flex;align-items:center;
-           box-shadow:0 1px 4px rgba(0,0,0,.6)}
-.owned-badge{background:var(--success);color:#000;
-             font-size:.6rem;font-weight:800;width:17px;height:17px;border-radius:50%;
-             display:flex;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.6)}
-.owned-badge.qb{background:var(--warning)}
+.card .ob-icons{margin-left:0;filter:drop-shadow(0 1px 3px rgba(0,0,0,.7))}
+.card .ob-icons .ob-i.off{opacity:.5;background:rgba(0,0,0,.55)!important;color:#ccc!important;border-color:#777}
 .card.owned img{opacity:.55}
 #owned-toggle,#listened-toggle{font-size:.72rem;color:var(--text-muted);display:flex;align-items:center;gap:4px;
               white-space:nowrap;cursor:pointer;user-select:none}
@@ -912,16 +909,10 @@ function render(data) {
       ? `<img src="${esc(a.cover)}" loading="lazy" alt="" onerror="this.style.display='none'">`
       : `<div class="no-cover">🎵</div>`;
 
-    const own = OWNED[a.rank];
-    if (own) card.classList.add('owned');
-    const badge = own
-      ? `<div class="owned-badge${own.includes('airsonic') ? '' : ' qb'}" title="Ya lo tengo: ${own.map(o => OWNED_LABEL[o]).join(' + ')}">${own.includes('airsonic') ? '✓' : '↓'}</div>`
-      : '';
-    const lis = LISTENED[a.rank];
-    const lfmBadge = lis
-      ? `<div class="lfm-badge" title="${lis.plays} escuchas${lis.last ? ' · última: ' + lis.last : ''}">♫ ${lis.plays}</div>`
-      : '';
-    card.innerHTML = img + `<div class="badges">${lfmBadge}${badge}</div>`
+    if (OWNED[a.rank]) card.classList.add('owned');
+    card.dataset.ownedArtist = a.artist || '';
+    card.dataset.ownedAlbum  = a.album || '';
+    card.innerHTML = img + `<div class="badges" data-owned-slot></div>`
       + `<div class="rank">#${a.rank ?? '?'}</div>`
       + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
       + `<div class="hi-album">${esc(a.album)}</div></div>`;
@@ -957,7 +948,8 @@ function select(a, cardEl) {
   document.getElementById('detail').innerHTML =
     `<div id="d-cover-wrap">${cover}</div>`
     + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${ALL.length}</div>`
-    + `<div id="d-artist">${esc(a.artist)}</div><div id="d-album">${esc(a.album)}</div>`
+    + `<div id="d-artist">${esc(a.artist)}</div>`
+    + `<div id="d-album" data-owned-artist="${esc(a.artist)}" data-owned-album="${esc(a.album)}">${esc(a.album)}</div>`
     + (OWNED[a.rank] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.rank].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
     + listenedLine(a.rank)
     + `</div>`
