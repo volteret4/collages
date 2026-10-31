@@ -395,12 +395,17 @@ def get_discogs_info(artist, album):
         out['credits'] = credits[:20]
 
         # Videos → YouTube links
-        videos = []
-        for v in detail.get('videos', []):
-            url = v.get('uri', '') or v.get('url', '')
-            title = v.get('title', '')
-            if url:
-                videos.append({'url': url, 'title': title})
+        # En los master los vídeos suelen estar en la edición principal: se juntan ambos
+        sources = [detail]
+        if res_type == 'master' and detail.get('main_release'):
+            sources.append(_disc_get(f"/releases/{detail['main_release']}"))
+        videos, seen_urls = [], set()
+        for src in sources:
+            for v in src.get('videos', []):
+                url = v.get('uri', '') or v.get('url', '')
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    videos.append({'url': url, 'title': v.get('title', '')})
         out['videos'] = videos
 
         # Social / external links from Discogs (urls field if present)
