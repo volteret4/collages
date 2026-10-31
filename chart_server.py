@@ -271,6 +271,14 @@ def _run_fetch(collage_id):
         after    = {os.path.basename(f) for f in glob.glob(os.path.join(DATA_DIR, '*.json'))}
         new_file = next((f for f in after - before if f.endswith('.json')), None)
         new_name = os.path.splitext(new_file)[0] if new_file else None
+        if not new_name:
+            # Actualización de un chart que ya existía: el fichero no es nuevo
+            with _job_lock:
+                name = _job.get('name')
+            if name and os.path.exists(os.path.join(DATA_DIR, name + '.json')):
+                new_name = name
+        # Lo que haya cambiado en Discogs se vuelve a consultar
+        _enrich_cache.clear()
 
         if new_name:
             data = read_collage(new_name)
@@ -418,10 +426,10 @@ def get_discogs_info(artist, album):
 
 _enrich_cache = {}
 
-def enrich(artist, album):
+def enrich(artist, album, refresh=False):
     # En memoria: al saltar adelante y atrás entre discos no se repiten las consultas
     key = (artist, album)
-    if key in _enrich_cache:
+    if key in _enrich_cache and not refresh:
         return _enrich_cache[key]
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
@@ -612,6 +620,12 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .col-item:hover{background:var(--surface-2);color:var(--text);border-left-color:var(--border)}
 .col-item.active{background:var(--surface-2);color:var(--text);border-left-color:var(--accent);font-weight:600}
 .col-count{font-size:.68rem;color:var(--text-muted)}
+.col-item .col-name{flex:1;min-width:0}
+.col-refresh{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:.85rem;
+             padding:0 0 0 6px;opacity:0;flex-shrink:0}
+.col-item:hover .col-refresh,.col-item.active .col-refresh{opacity:1}
+.col-refresh:hover{color:var(--accent-2)}
+.col-refresh:disabled{opacity:.3;cursor:default}
 
 #sb-fetch{padding:12px 14px;border-top:1px solid var(--border);flex-shrink:0}
 #sb-fetch label{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;
@@ -910,8 +924,13 @@ async function loadList(selectName) {
     div.className = 'col-item';
     div.dataset.name = c.name;
     const meta = [c.count + ' álb.', c.fetched || c.updated || ''].filter(Boolean).join(' · ');
-    div.innerHTML = `<span>${esc(c.name)}</span><span class="col-count">${meta}</span>`;
+    div.innerHTML = `<span class="col-name">${esc(c.name)}</span><span class="col-count">${meta}</span>`
+      + (c.id ? `<button class="col-refresh" title="Actualizar desde Orpheus (portadas y vídeos incluidos)">↻</button>` : '');
     div.addEventListener('click', () => loadCollage(c.name, div));
+    if (c.id) div.querySelector('.col-refresh').addEventListener('click', e => {
+      e.stopPropagation();
+      runFetch(c.id);
+    });
     el.appendChild(div);
     if (c.name === selectName) div.click();
   }
@@ -964,6 +983,13 @@ function applyFilter() {
     && !(hide && OWNED[a.rank]) && !(hideL && LISTENED[a.rank])));
 }
 
+// Si la portada no carga se prueba la de respaldo; si tampoco, se oculta
+function coverError(img, keepSpace) {
+  const alt = img.dataset.alt;
+  if (alt && img.src !== alt) { img.dataset.alt = ''; img.src = alt; return; }
+  if (keepSpace) img.style.opacity = 0; else img.style.display = 'none';
+}
+
 // ── Render grid ───────────────────────────────────────────────────────────────
 function render(data) {
   const grid = document.getElementById('grid');
@@ -980,7 +1006,7 @@ function render(data) {
     card.dataset.rank = a.rank ?? 0;
 
     const img = a.cover
-      ? `<img src="${esc(a.cover)}" loading="lazy" alt="" onerror="this.style.display='none'">`
+      ? `<img src="${esc(a.cover)}" loading="lazy" alt="" data-alt="${esc(a.cover_alt || '')}" onerror="coverError(this)">`
       : `<div class="no-cover">🎵</div>`;
 
     if (OWNED[a.rank]) card.classList.add('owned');
@@ -1027,7 +1053,7 @@ function select(a, cardEl, dir) {
   ensureDetailSkeleton();
 
   const cover = a.cover
-    ? `<img id="d-cover" src="${esc(a.cover)}" alt="" onerror="this.style.opacity=0">`
+    ? `<img id="d-cover" src="${esc(a.cover)}" alt="" data-alt="${esc(a.cover_alt || '')}" onerror="coverError(this, true)">`
     : `<div id="d-no-cover">🎵</div>`;
 
   const orpheusBtn = a.orpheus_url
@@ -1185,6 +1211,7 @@ function renderQueue() {
   }).join('');
   el.innerHTML =
     `<div id="d-queue-head"><span>Vídeos${QUEUE.length ? ' (' + QUEUE.length + ')' : ''}${own ? ' · enlaces propios' : ''}</span>`
+    + `<button class="q-btn" id="q-refresh" title="Volver a consultar los vídeos de Discogs">↻</button>`
     + `<button class="q-btn" id="q-edit" title="Aportar otro enlace">✎ Otro enlace</button></div>`
     + `<div id="q-list">${items}</div>`
     + `<div id="q-form" hidden>`
@@ -1196,9 +1223,24 @@ function renderQueue() {
     + `<div class="q-keys">N siguiente · B anterior</div>`;
   el.querySelectorAll('.q-item').forEach(d => d.addEventListener('click', () => playIndex(+d.dataset.i)));
   document.getElementById('q-edit').addEventListener('click', () => openLinkForm(true));
+  document.getElementById('q-refresh').addEventListener('click', refreshAlbumVideos);
   document.getElementById('q-cancel').addEventListener('click', () => { document.getElementById('q-form').hidden = true; });
   document.getElementById('q-save').addEventListener('click', saveLinks);
   if (own) document.getElementById('q-reset').addEventListener('click', () => storeLinks([]));
+}
+
+async function refreshAlbumVideos() {
+  const a = CUR, btn = document.getElementById('q-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  let data = {};
+  try {
+    data = await (await fetch('/api/enrich?' + new URLSearchParams({artist: a.artist, album: a.album, refresh: 1}))).json();
+  } catch (e) {}
+  if (CUR !== a) return;
+  const before = QUEUE.length;
+  queueFromDiscogs((data.discogs || {}).videos || []);
+  const head = document.querySelector('#d-queue-head span');
+  if (head) head.textContent += QUEUE.length > before ? ` · ${QUEUE.length - before} nuevos` : ' · sin cambios';
 }
 
 function openLinkForm(focus) {
@@ -1445,13 +1487,23 @@ async function startFetch() {
   const id = fetchInput.value.trim();
   const isUrl = /^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id);
   if (!id || (!isUrl && isNaN(+id))) { setStatus('Introduce un ID o URL válida', 'err'); return; }
+  runFetch(isUrl ? id : +id);
+}
+
+async function runFetch(cid) {
   fetchBtn.disabled = true;
+  document.querySelectorAll('.col-refresh').forEach(b => b.disabled = true);
   setStatus('Iniciando…', 'running');
-  const r = await api('/api/fetch', {collage_id: isUrl ? id : +id});
-  if (r.error) { setStatus(r.error, 'err'); fetchBtn.disabled = false; return; }
+  const r = await api('/api/fetch', {collage_id: cid});
+  if (r.error) { setStatus(r.error, 'err'); fetchDone(); return; }
   floatDismissed = false;
-  updateFloat({running: true, id: isUrl ? id : +id});
+  updateFloat({running: true, id: cid});
   pollJob();
+}
+
+function fetchDone() {
+  fetchBtn.disabled = false;
+  document.querySelectorAll('.col-refresh').forEach(b => b.disabled = false);
 }
 
 function pollJob() {
@@ -1464,13 +1516,18 @@ function pollJob() {
       pollJob();
     } else if (s.done) {
       setStatus('✓ Completado', 'done');
-      fetchBtn.disabled = false;
-      await loadList(s.last_name);
+      // Si el chart actualizado es el que está abierto se recarga; si no, se abre
+      // solo cuando no hay otro abierto (para no cortar lo que está sonando)
+      const open   = document.querySelector('.col-item.active')?.dataset.name;
+      const target = !open || open === s.last_name ? s.last_name : null;
+      await loadList(target);
+      if (!target) document.querySelector(`.col-item[data-name="${CSS.escape(open)}"]`)?.classList.add('active');
+      fetchDone();
     } else if (s.error) {
       setStatus('✗ ' + s.error.split('\n')[0], 'err');
-      fetchBtn.disabled = false;
+      fetchDone();
     } else {
-      fetchBtn.disabled = false;
+      fetchDone();
     }
   }, 1000);
 }
@@ -1562,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
             album  = qs.get('album',  [''])[0].strip()
             if not artist or not album:
                 self._json({'error': 'artist and album required'}, 400); return
-            self._json(enrich(artist, album)); return
+            self._json(enrich(artist, album, qs.get('refresh', [''])[0] == '1')); return
 
         self._send(HTML)
 

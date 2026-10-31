@@ -58,12 +58,13 @@ def init_db():
         orpheus_group_id INTEGER
     )
     """)
-    # Migrate existing DBs that lack the column
-    try:
-        cur.execute("ALTER TABLE albums ADD COLUMN orpheus_group_id INTEGER")
-        con.commit()
-    except sqlite3.OperationalError:
-        pass
+    # Migrate existing DBs that lack the columns
+    for col in ("orpheus_group_id INTEGER", "orig_cover_url TEXT"):
+        try:
+            cur.execute(f"ALTER TABLE albums ADD COLUMN {col}")
+            con.commit()
+        except sqlite3.OperationalError:
+            pass
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS collections (
@@ -453,9 +454,10 @@ def get_or_create_album(artist_id, name, group_id=None):
     return album_id, None, None
 
 
-def update_cover(album_id, cover):
+def update_cover(album_id, cover, orig=None):
     con = db()
-    con.execute("UPDATE albums SET cover_url=? WHERE id=?", (cover, album_id))
+    con.execute("UPDATE albums SET cover_url=?, orig_cover_url=COALESCE(?, orig_cover_url) WHERE id=?",
+                (cover, orig, album_id))
     con.commit()
     con.close()
 
@@ -527,15 +529,19 @@ def main():
         artist_id = get_or_create_artist(a["artist"])
         album_id, yt, stored_cover = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
 
-        cover = a["cover"] or stored_cover
-        if not cover_ok(cover):
-            mb_cover = musicbrainz_cover(a["artist"], a["album"])
-            if mb_cover:
-                print(f"  ↳ Portada MusicBrainz: {mb_cover}")
-                cover = mb_cover
+        # Portada: primero Cover Art Archive (los hotlinks de Orpheus caducan a
+        # menudo); la de Orpheus queda como respaldo (orig_cover_url)
+        orig  = a["cover"]
+        cover = stored_cover if "coverartarchive.org" in (stored_cover or "") else None
+        if not cover:
+            cover = musicbrainz_cover(a["artist"], a["album"])
+            if cover:
+                print(f"  ↳ Portada Cover Art Archive: {cover}")
+        if not cover:
+            cover = orig if cover_ok(orig) else (stored_cover or orig)
         a["cover"] = cover
-        if cover != stored_cover:
-            update_cover(album_id, cover)
+        if cover != stored_cover or orig:
+            update_cover(album_id, cover, orig)
 
         if not yt:
             yt_url, yt_id = discogs_youtube_url(a["artist"], a["album"])
@@ -571,7 +577,7 @@ def export_json(collage_name):
 
     rows = cur.execute("""
         SELECT a.name, al.name, al.youtube_url, al.yt_id, al.cover_url, ca.rank,
-               al.orpheus_group_id
+               al.orpheus_group_id, al.orig_cover_url
         FROM collection_albums ca
         JOIN albums al ON ca.album_id = al.id
         JOIN artists a  ON al.artist_id = a.id
@@ -587,6 +593,7 @@ def export_json(collage_name):
             "youtube":     r[2],
             "embed":       f"https://www.youtube.com/embed/{r[3]}?rel=0" if r[3] else None,
             "cover":       r[4],
+            "cover_alt":   r[7] if r[7] and r[7] != r[4] else None,
             "orpheus_url": f"https://orpheus.network/torrents.php?id={r[6]}" if r[6] else None,
         }
         for r in rows
