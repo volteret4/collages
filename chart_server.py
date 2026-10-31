@@ -1220,7 +1220,7 @@ function renderQueue() {
     + (own ? `<button class="q-btn" id="q-reset" title="Volver a los vídeos del chart y Discogs">Quitar</button>` : '')
     + `<button class="q-btn" id="q-cancel">Cancelar</button><button class="q-btn" id="q-save">Guardar</button></div>`
     + `<div id="q-hint">Sustituyen a los vídeos del chart y de Discogs para este disco.</div></div>`
-    + `<div class="q-keys">N siguiente · B anterior · Mayús+←/→ ±10 s</div>`;
+    + `<div class="q-keys">N siguiente · B anterior · +/− ±10 s</div>`;
   el.querySelectorAll('.q-item').forEach(d => d.addEventListener('click', () => playIndex(+d.dataset.i)));
   document.getElementById('q-edit').addEventListener('click', () => openLinkForm(true));
   document.getElementById('q-refresh').addEventListener('click', refreshAlbumVideos);
@@ -1407,10 +1407,10 @@ document.addEventListener('keydown', e => {
     if (k === 'n') nextTrack(); else prevTrack();
     return;
   }
-  // Mayús+←/→: retrocede/avanza 10 s (sin choques con Surfingkeys)
-  if (e.shiftKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ytPlayer && ytPlayer.getCurrentTime) {
+  // + / -: avanza/retrocede 10 s (las flechas son para moverse entre discos)
+  if ((e.key === '+' || e.key === '-') && ytPlayer && ytPlayer.getCurrentTime) {
     e.preventDefault();
-    const t = ytPlayer.getCurrentTime() + (e.key === 'ArrowRight' ? 10 : -10);
+    const t = ytPlayer.getCurrentTime() + (e.key === '+' ? 10 : -10);
     ytPlayer.seekTo(Math.max(0, t), true);
     return;
   }
