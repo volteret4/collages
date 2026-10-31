@@ -37,7 +37,9 @@ SCRIPT       = os.path.join(APP_DIR, 'yt-chart.py')
 REGISTRY     = os.path.join(DATA_DIR, 'chart_registry.json')
 # Enlaces de vídeo aportados a mano, por artista|álbum normalizados
 CUSTOM_LINKS = os.path.join(DATA_DIR, 'custom_links.json')
-_SKIP_NAMES  = {'charts_orpheus', 'chart_registry', 'custom_links'}
+# Grupos de la barra lateral: [{id, name, members: [clave de fuente]}]
+GROUPS_FILE  = os.path.join(DATA_DIR, 'groups.json')
+_SKIP_NAMES  = {'charts_orpheus', 'chart_registry', 'custom_links', 'groups'}
 
 # ── Panel de configuración (⚙) ───────────────────────────────────────────────
 # Mismo patrón que el resto de apps.
@@ -173,6 +175,59 @@ def list_collages():
         if name not in reg_names:
             result.append(info)
     return result
+
+
+# Tipos de Orpheus, en el orden en que salen las secciones del grid
+_RTYPES = ['Album', 'EP', 'Single', 'Compilation', 'Anthology', 'Live album', 'Remix',
+           'Soundtrack', 'DJ Mix', 'Mixtape', 'Bootleg', 'Demo', 'Concert Recording',
+           'Interview', 'Unknown']
+
+
+def list_sources(cols):
+    """Agrupa los charts por fuente: las búsquedas de un mismo sello («Kranky · Album»,
+    «Kranky · EP»…) son una sola fuente con una parte por tipo; un collage es su propia fuente."""
+    sources = {}
+    for c in cols:
+        name, cid = c['name'], c.get('id')
+        label, rtype = name, None
+        if ' · ' in name:
+            head, tail = name.rsplit(' · ', 1)
+            if tail in _RTYPES:
+                label, rtype = head, tail
+        if rtype or (isinstance(cid, str) and 'torrents.php' in cid):
+            key, kind = 'label:' + _norm(label), 'label'
+        else:
+            key, kind = 'chart:' + name, 'chart'
+        src = sources.setdefault(key, {'key': key, 'name': label.strip(), 'kind': kind, 'parts': []})
+        src['parts'].append({**c, 'rtype': rtype})
+    for src in sources.values():
+        src['parts'].sort(key=lambda p: _RTYPES.index(p['rtype']) if p['rtype'] in _RTYPES else -1)
+        src['count']   = sum(p.get('count') or 0 for p in src['parts'])
+        src['updated'] = max((p.get('updated') or p.get('fetched') or '' for p in src['parts']), default='')
+    return sorted(sources.values(), key=lambda s: s['name'].lower())
+
+
+def load_groups():
+    try:
+        with open(GROUPS_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return []
+
+
+def save_groups(groups):
+    clean = []
+    for g in groups:
+        if not isinstance(g, dict) or not str(g.get('name') or '').strip():
+            continue
+        members = [m for m in (g.get('members') or []) if isinstance(m, str)]
+        clean.append({'id': str(g.get('id') or ''), 'name': str(g['name']).strip(),
+                      'members': list(dict.fromkeys(members))})
+    tmp = GROUPS_FILE + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(clean, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, GROUPS_FILE)
+    return clean
 
 
 def read_collage(name):
@@ -620,7 +675,37 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .col-item:hover{background:var(--surface-2);color:var(--text);border-left-color:var(--border)}
 .col-item.active{background:var(--surface-2);color:var(--text);border-left-color:var(--accent);font-weight:600}
 .col-count{font-size:.68rem;color:var(--text-muted)}
-.col-item .col-name{flex:1;min-width:0}
+.col-item .col-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-item .col-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.col-item.in-group{padding-left:26px}
+.col-menu{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:.85rem;
+          padding:0 0 0 6px;opacity:0;flex-shrink:0}
+.col-item:hover .col-menu,.col-item.active .col-menu{opacity:1}
+.col-menu:hover{color:var(--accent-2)}
+.grp-head{display:flex;align-items:center;gap:6px;padding:7px 14px 7px 10px;cursor:pointer;
+          font-size:.78rem;font-weight:700;color:var(--text);user-select:none}
+.grp-head:hover{background:var(--surface-2)}
+.grp-head .grp-arrow{width:12px;color:var(--text-muted);font-size:.7rem}
+.grp-head .grp-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grp-head .grp-n{font-size:.66rem;font-weight:400;color:var(--text-muted)}
+.grp-head button{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:.75rem;
+                 padding:0 2px;opacity:0}
+.grp-head:hover button{opacity:1}
+.grp-head button:hover{color:var(--accent-2)}
+.grp-empty{padding:4px 14px 6px 26px;font-size:.7rem;color:var(--text-muted);font-style:italic}
+.sb-sep{margin:6px 14px;border-top:1px solid var(--border)}
+#sb-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+#grp-add{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);border-radius:3px;
+         font-size:.68rem;padding:2px 8px;cursor:pointer}
+#grp-add:hover{color:var(--text)}
+#grp-menu{position:fixed;z-index:9500;background:var(--surface);border:1px solid var(--border);border-radius:6px;
+          box-shadow:0 8px 26px rgba(0,0,0,.5);padding:6px 0;min-width:190px;font-size:.76rem}
+#grp-menu[hidden]{display:none}
+#grp-menu .gm-title{padding:3px 12px 6px;font-size:.6rem;font-weight:700;color:var(--text-muted);
+                    text-transform:uppercase;letter-spacing:.08em}
+#grp-menu label{display:flex;align-items:center;gap:7px;padding:4px 12px;cursor:pointer;color:var(--text)}
+#grp-menu label:hover,#grp-menu .gm-new:hover{background:var(--surface-2)}
+#grp-menu .gm-new{padding:5px 12px;cursor:pointer;color:var(--accent-2);border-top:1px solid var(--border);margin-top:4px}
 .col-refresh{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:.85rem;
              padding:0 0 0 6px;opacity:0;flex-shrink:0}
 .col-item:hover .col-refresh,.col-item.active .col-refresh{opacity:1}
@@ -662,7 +747,14 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 #grid-count{font-size:.7rem;color:var(--text-muted);white-space:nowrap}
 
 #grid-wrap{flex:1;overflow-y:auto;padding:10px}
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:6px}
+#grid{display:flex;flex-direction:column;gap:14px}
+.sec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:6px}
+.sec-head{display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:.7rem;font-weight:700;
+          color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em}
+.sec-head .sec-n{font-weight:400;opacity:.7}
+.sec-head .sec-refresh{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:.85rem;padding:0}
+.sec-head .sec-refresh:hover{color:var(--accent-2)}
+.sec-head .sec-refresh:disabled{opacity:.3;cursor:default}
 
 #placeholder{flex:1;display:flex;align-items:center;justify-content:center;
              color:var(--text-muted);font-size:1rem;flex-direction:column;gap:8px}
@@ -834,7 +926,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 
   #grid-panel{width:100%}
   #grid-wrap{padding:8px}
-  #grid{grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:5px}
+  .sec-grid{grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:5px}
 
   #detail{width:100%;min-width:0;border-left:none;border-top:1px solid var(--border);max-height:none}
 
@@ -854,7 +946,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 <body>
 
 <div id="sidebar">
-  <div id="sb-head"><h1><span>▶</span> Chart Viewer</h1></div>
+  <div id="sb-head"><h1><span>▶</span> Chart Viewer</h1><button id="grp-add" title="Crear un grupo">+ Grupo</button></div>
   <div id="sb-list"></div>
   <div id="sb-fetch">
     <label>Obtener collage o búsqueda</label>
@@ -865,6 +957,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
     <div id="job-status"></div>
   </div>
 </div>
+
+<div id="grp-menu" hidden></div>
 
 <div id="job-float" hidden>
   <div id="jf-head"><span id="jf-title"></span><button id="jf-close" title="Cerrar">×</button></div>
@@ -914,40 +1008,152 @@ async function api(ep, body) {
   return (await fetch(ep, opts)).json();
 }
 
-// ── Sidebar collage list ──────────────────────────────────────────────────────
-async function loadList(selectName) {
-  const cols = await api('/api/list');
-  const el   = document.getElementById('sb-list');
-  el.innerHTML = '';
-  for (const c of cols) {
-    const div = document.createElement('div');
-    div.className = 'col-item';
-    div.dataset.name = c.name;
-    const meta = [c.count + ' álb.', c.fetched || c.updated || ''].filter(Boolean).join(' · ');
-    div.innerHTML = `<span class="col-name">${esc(c.name)}</span><span class="col-count">${meta}</span>`
-      + (c.id ? `<button class="col-refresh" title="Actualizar desde Orpheus (portadas y vídeos incluidos)">↻</button>` : '');
-    div.addEventListener('click', () => loadCollage(c.name, div));
-    if (c.id) div.querySelector('.col-refresh').addEventListener('click', e => {
-      e.stopPropagation();
-      runFetch(c.id);
-    });
-    el.appendChild(div);
-    if (c.name === selectName) div.click();
+// ── Barra lateral: fuentes (sello o collage) y grupos ─────────────────────────
+// Una fuente agrupa los charts de un mismo sello («Kranky · Album», «Kranky · EP»…)
+let SOURCES = [], GROUPS = [], SRC = null, loadToken = 0, FETCH_QUEUE = [];
+const COLLAPSED = new Set(JSON.parse(localStorage.getItem('charts-collapsed') || '[]'));
+const RTYPE_LABEL = {
+  'Album': 'Álbumes', 'EP': 'EPs', 'Single': 'Singles', 'Compilation': 'Recopilatorios',
+  'Anthology': 'Antologías', 'Live album': 'Directos', 'Remix': 'Remixes',
+  'Soundtrack': 'Bandas sonoras', 'DJ Mix': 'DJ Mixes', 'Mixtape': 'Mixtapes',
+  'Bootleg': 'Bootlegs', 'Demo': 'Demos', 'Concert Recording': 'Conciertos',
+  'Interview': 'Entrevistas', 'Unknown': 'Otros',
+};
+const RTYPE_SHORT = {'Album': 'álb.', 'EP': 'EP', 'Single': 'single', 'Compilation': 'recop.'};
+
+// sel: clave de fuente o nombre de uno de sus charts; se abre si existe
+async function loadList(sel) {
+  [SOURCES, GROUPS] = await Promise.all([api('/api/sources'), api('/api/groups')]);
+  renderSidebar();
+  if (sel) {
+    const src = SOURCES.find(x => x.key === sel || x.parts.some(p => p.name === sel));
+    if (src) loadSource(src.key);
   }
 }
 
-// ── Load collage data ─────────────────────────────────────────────────────────
-async function loadCollage(name, sidebarEl) {
-  document.querySelectorAll('.col-item').forEach(e => e.classList.remove('active'));
-  if (sidebarEl) sidebarEl.classList.add('active');
+function renderSidebar() {
+  const el = document.getElementById('sb-list');
+  el.innerHTML = '';
+  const byKey = Object.fromEntries(SOURCES.map(x => [x.key, x]));
+  const grouped = new Set();
+  for (const g of GROUPS) {
+    const members = g.members.map(k => byKey[k]).filter(Boolean)
+      .sort((x, y) => x.name.localeCompare(y.name));
+    members.forEach(m => grouped.add(m.key));
+    const closed = COLLAPSED.has(g.id);
+    const head = document.createElement('div');
+    head.className = 'grp-head';
+    head.innerHTML = `<span class="grp-arrow">${closed ? '▸' : '▾'}</span>`
+      + `<span class="grp-name">${esc(g.name)}</span><span class="grp-n">${members.length}</span>`
+      + `<button class="grp-ren" title="Renombrar">✎</button><button class="grp-del" title="Borrar grupo">✕</button>`;
+    head.addEventListener('click', () => {
+      if (COLLAPSED.has(g.id)) COLLAPSED.delete(g.id); else COLLAPSED.add(g.id);
+      localStorage.setItem('charts-collapsed', JSON.stringify([...COLLAPSED]));
+      renderSidebar();
+    });
+    head.querySelector('.grp-ren').addEventListener('click', e => { e.stopPropagation(); renameGroup(g); });
+    head.querySelector('.grp-del').addEventListener('click', e => { e.stopPropagation(); deleteGroup(g); });
+    el.appendChild(head);
+    if (closed) continue;
+    if (!members.length) {
+      el.insertAdjacentHTML('beforeend', '<div class="grp-empty">Vacío: añade entradas con ⋯</div>');
+    }
+    members.forEach(m => el.appendChild(sourceItem(m, true)));
+  }
+  const loose = SOURCES.filter(x => !grouped.has(x.key));
+  if (GROUPS.length && loose.length) el.insertAdjacentHTML('beforeend', '<div class="sb-sep"></div>');
+  loose.forEach(m => el.appendChild(sourceItem(m, false)));
+}
 
-  const data = await api('/api/data/' + encodeURIComponent(name));
-  if (!data || data.error) return;
+function sourceItem(src, inGroup) {
+  const div = document.createElement('div');
+  div.className = 'col-item' + (inGroup ? ' in-group' : '') + (SRC && SRC.key === src.key ? ' active' : '');
+  div.dataset.key = src.key;
+  const types = src.parts.length > 1 || src.parts[0].rtype
+    ? src.parts.map(p => `${p.count || 0} ${RTYPE_SHORT[p.rtype] || (p.rtype || 'todo').toLowerCase()}`).join(' · ')
+    : `${src.count} álb.`;
+  const canRefresh = src.parts.some(p => p.id);
+  div.innerHTML = `<div class="col-main"><span class="col-name">${esc(src.name)}</span>`
+    + `<span class="col-count">${esc(types)}${src.updated ? ' · ' + esc(src.updated) : ''}</span></div>`
+    + (canRefresh ? `<button class="col-refresh" title="Actualizar desde Orpheus (portadas y vídeos incluidos)">↻</button>` : '')
+    + `<button class="col-menu" title="Grupos">⋯</button>`;
+  div.addEventListener('click', () => loadSource(src.key));
+  if (canRefresh) div.querySelector('.col-refresh').addEventListener('click', e => {
+    e.stopPropagation();
+    refreshParts(src.parts.filter(p => p.id).map(p => p.id));
+  });
+  div.querySelector('.col-menu').addEventListener('click', e => { e.stopPropagation(); openGroupMenu(src, e.currentTarget); });
+  return div;
+}
 
-  ALL     = data;
+// ── Grupos ────────────────────────────────────────────────────────────────────
+async function saveGroups() {
+  const r = await api('/api/groups', {groups: GROUPS});
+  if (r && r.groups) GROUPS = r.groups;
+  renderSidebar();
+}
+
+function newGroup(firstMember) {
+  const name = (prompt('Nombre del grupo') || '').trim();
+  if (!name) return null;
+  const g = {id: 'g' + Date.now().toString(36), name, members: firstMember ? [firstMember] : []};
+  GROUPS.push(g);
+  saveGroups();
+  return g;
+}
+
+function renameGroup(g) {
+  const name = (prompt('Nuevo nombre', g.name) || '').trim();
+  if (!name || name === g.name) return;
+  g.name = name;
+  saveGroups();
+}
+
+function deleteGroup(g) {
+  if (!confirm(`¿Borrar el grupo «${g.name}»? Sus entradas no se borran, vuelven a la lista.`)) return;
+  GROUPS = GROUPS.filter(x => x !== g);
+  saveGroups();
+}
+
+const grpMenu = document.getElementById('grp-menu');
+function openGroupMenu(src, anchor) {
+  grpMenu.innerHTML = `<div class="gm-title">Grupos de «${esc(src.name)}»</div>`
+    + GROUPS.map((g, i) => `<label><input type="checkbox" data-i="${i}"${g.members.includes(src.key) ? ' checked' : ''}> ${esc(g.name)}</label>`).join('')
+    + `<div class="gm-new">+ Nuevo grupo con esta entrada…</div>`;
+  grpMenu.querySelectorAll('input').forEach(cb => cb.addEventListener('change', () => {
+    const g = GROUPS[+cb.dataset.i];
+    g.members = cb.checked ? [...g.members, src.key] : g.members.filter(k => k !== src.key);
+    saveGroups();
+  }));
+  grpMenu.querySelector('.gm-new').addEventListener('click', () => { grpMenu.hidden = true; newGroup(src.key); });
+  grpMenu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  grpMenu.style.left = Math.min(r.left, innerWidth - grpMenu.offsetWidth - 8) + 'px';
+  grpMenu.style.top  = Math.min(r.bottom + 4, innerHeight - grpMenu.offsetHeight - 8) + 'px';
+}
+document.addEventListener('click', e => { if (!grpMenu.hidden && !grpMenu.contains(e.target)) grpMenu.hidden = true; });
+document.getElementById('grp-add').addEventListener('click', () => newGroup());
+
+// ── Cargar una fuente: todas sus partes, una sección por tipo ─────────────────
+async function loadSource(key) {
+  const src = SOURCES.find(x => x.key === key);
+  if (!src) return;
+  SRC = src;
+  document.querySelectorAll('.col-item').forEach(e => e.classList.toggle('active', e.dataset.key === key));
+  const token = ++loadToken;
+
+  const datas = await Promise.all(src.parts.map(p => api('/api/data/' + encodeURIComponent(p.name)).catch(() => null)));
+  if (token !== loadToken) return;
+
+  // uid: identificador único del disco dentro de la fuente (los puestos se repiten entre partes)
+  ALL = [];
+  src.parts.forEach((p, pi) => {
+    const d = Array.isArray(datas[pi]) ? datas[pi] : [];
+    d.forEach(a => ALL.push({...a, uid: ALL.length, part: p.name, rtype: p.rtype, partCount: d.length}));
+  });
   current = -1;
 
-  document.getElementById('col-title').textContent = name;
+  document.getElementById('col-title').textContent = src.name;
   document.getElementById('toolbar').style.display   = '';
   document.getElementById('grid-wrap').style.display = '';
   document.getElementById('placeholder').style.display = 'none';
@@ -958,17 +1164,24 @@ async function loadCollage(name, sidebarEl) {
   document.getElementById('owned-toggle').hidden = true;
   document.getElementById('listened-toggle').hidden = true;
   render(ALL);
-  loadOwned(name);
+  loadOwned(src, token);
 }
 
 // ── Álbumes que ya tengo (Airsonic / qBittorrent) ─────────────────────────────
-async function loadOwned(name) {
-  let r;
-  try { r = await api('/api/owned/' + encodeURIComponent(name)); } catch (e) { return; }
-  if (!r || r.error || document.getElementById('col-title').textContent !== name) return;
-  OWNED        = r.owned || {};
-  LISTENED     = r.listened || {};
-  ARTIST_PLAYS = r.artist_plays || {};
+async function loadOwned(src, token) {
+  const rs = await Promise.all(src.parts.map(p =>
+    api('/api/owned/' + encodeURIComponent(p.name)).catch(() => null)));
+  if (token !== loadToken) return;
+  src.parts.forEach((p, pi) => {
+    const r = rs[pi];
+    if (!r || r.error) return;
+    for (const a of ALL) {
+      if (a.part !== p.name) continue;
+      if (r.owned && r.owned[a.rank]) OWNED[a.uid] = r.owned[a.rank];
+      if (r.listened && r.listened[a.rank]) LISTENED[a.uid] = r.listened[a.rank];
+      if (r.artist_plays && r.artist_plays[a.rank]) ARTIST_PLAYS[a.uid] = r.artist_plays[a.rank];
+    }
+  });
   document.getElementById('owned-toggle').hidden    = !Object.keys(OWNED).length;
   document.getElementById('listened-toggle').hidden = !Object.keys(LISTENED).length;
   applyFilter();
@@ -980,7 +1193,7 @@ function applyFilter() {
   const hideL = document.getElementById('hide-listened').checked;
   render(ALL.filter(a =>
     (!q || (a.artist||'').toLowerCase().includes(q) || (a.album||'').toLowerCase().includes(q))
-    && !(hide && OWNED[a.rank]) && !(hideL && LISTENED[a.rank])));
+    && !(hide && OWNED[a.uid]) && !(hideL && LISTENED[a.uid])));
 }
 
 // Si la portada no carga se prueba la de respaldo; si tampoco, se oculta
@@ -994,32 +1207,53 @@ function coverError(img, keepSpace) {
 function render(data) {
   const grid = document.getElementById('grid');
   grid.innerHTML = '';
-  const nOwned    = ALL.filter(a => OWNED[a.rank]).length;
-  const nListened = ALL.filter(a => LISTENED[a.rank]).length;
+  const nOwned    = ALL.filter(a => OWNED[a.uid]).length;
+  const nListened = ALL.filter(a => LISTENED[a.uid]).length;
   document.getElementById('grid-count').textContent =
     data.length + ' álbumes' + (nOwned ? ` · ${nOwned} ya los tengo` : '')
     + (nListened ? ` · ${nListened} escuchados` : '');
 
-  data.forEach(a => {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.dataset.rank = a.rank ?? 0;
+  // Una sección por parte (tipo); un collage suelto no lleva cabecera
+  const parts = SRC ? SRC.parts : [];
+  const withHeads = parts.length > 1 || (parts[0] && parts[0].rtype);
+  for (const p of parts) {
+    const items = data.filter(a => a.part === p.name);
+    if (!items.length) continue;
+    const sec = document.createElement('div');
+    sec.className = 'sec';
+    if (withHeads)
+      sec.innerHTML = `<div class="sec-head"><span>${esc(RTYPE_LABEL[p.rtype] || p.rtype || 'Todo')}</span>`
+        + `<span class="sec-n">${items.length}</span>`
+        + (p.id ? `<button class="sec-refresh col-refresh" title="Actualizar solo esta sección">↻</button>` : '')
+        + `</div>`;
+    const g = document.createElement('div');
+    g.className = 'sec-grid';
+    items.forEach(a => g.appendChild(card(a)));
+    sec.appendChild(g);
+    if (withHeads && p.id) sec.querySelector('.sec-refresh').addEventListener('click', () => refreshParts([p.id]));
+    grid.appendChild(sec);
+  }
+}
 
-    const img = a.cover
-      ? `<img src="${esc(a.cover)}" loading="lazy" alt="" data-alt="${esc(a.cover_alt || '')}" onerror="coverError(this)">`
-      : `<div class="no-cover">🎵</div>`;
+function card(a) {
+  const card = document.createElement('div');
+  card.className = 'card' + (a.uid === current ? ' active' : '');
+  card.dataset.uid = a.uid;
 
-    if (OWNED[a.rank]) card.classList.add('owned');
-    card.dataset.ownedArtist = a.artist || '';
-    card.dataset.ownedAlbum  = a.album || '';
-    card.innerHTML = img + `<div class="badges" data-owned-slot></div>`
-      + `<div class="rank">#${a.rank ?? '?'}</div>`
-      + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
-      + `<div class="hi-album">${esc(a.album)}</div></div>`;
+  const img = a.cover
+    ? `<img src="${esc(a.cover)}" loading="lazy" alt="" data-alt="${esc(a.cover_alt || '')}" onerror="coverError(this)">`
+    : `<div class="no-cover">🎵</div>`;
 
-    card.addEventListener('click', () => select(a, card));
-    grid.appendChild(card);
-  });
+  if (OWNED[a.uid]) card.classList.add('owned');
+  card.dataset.ownedArtist = a.artist || '';
+  card.dataset.ownedAlbum  = a.album || '';
+  card.innerHTML = img + `<div class="badges" data-owned-slot></div>`
+    + `<div class="rank">#${a.rank ?? '?'}</div>`
+    + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
+    + `<div class="hi-album">${esc(a.album)}</div></div>`;
+
+  card.addEventListener('click', () => select(a, card));
+  return card;
 }
 
 // ── Select album ──────────────────────────────────────────────────────────────
@@ -1044,10 +1278,10 @@ function ensureDetailSkeleton() {
 
 function select(a, cardEl, dir) {
   navDir  = dir || 0;   // 0 = elegido a mano; ±1 = avance automático o N/B
-  current = a.rank ?? 0;
+  current = a.uid;
   CUR     = a;
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
-  if (!cardEl) cardEl = document.querySelector(`.card[data-rank="${current}"]`);
+  if (!cardEl) cardEl = document.querySelector(`.card[data-uid="${current}"]`);
   if (cardEl) { cardEl.classList.add('active'); cardEl.scrollIntoView({block:'nearest'}); }
 
   ensureDetailSkeleton();
@@ -1065,11 +1299,11 @@ function select(a, cardEl, dir) {
 
   document.getElementById('d-head').innerHTML =
     `<div id="d-cover-wrap">${cover}</div>`
-    + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${ALL.length}</div>`
+    + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${a.partCount}${a.rtype ? ' · ' + esc(RTYPE_LABEL[a.rtype] || a.rtype) : ''}</div>`
     + `<div id="d-artist">${esc(a.artist)}</div>`
     + `<div id="d-album" data-owned-artist="${esc(a.artist)}" data-owned-album="${esc(a.album)}">${esc(a.album)}</div>`
-    + (OWNED[a.rank] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.rank].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
-    + listenedLine(a.rank)
+    + (OWNED[a.uid] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.uid].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
+    + listenedLine(a.uid)
     + `</div>`
     + `<div id="d-link">${orpheusBtn}${ytBtn}</div>`;
   document.getElementById('d-extra').innerHTML = '<div class="d-loading">Cargando info…</div>';
@@ -1191,11 +1425,10 @@ function prevTrack() {
 function stepAlbum(dir) {
   const cards = [...document.querySelectorAll('.card')];
   if (!cards.length) return;
-  const idx = cards.findIndex(c => +c.dataset.rank === current);
+  const idx = cards.findIndex(c => +c.dataset.uid === current);
   const n = idx < 0 ? (dir > 0 ? 0 : cards.length - 1) : idx + dir;
   if (n < 0 || n >= cards.length) { showNoVideo('Fin de la lista'); return; }
-  const card = cards[n], rank = +card.dataset.rank;
-  const item = ALL.find(a => (a.rank ?? 0) === rank);
+  const card = cards[n], item = ALL[+card.dataset.uid];
   if (item) select(item, card, dir);
 }
 
@@ -1273,8 +1506,8 @@ async function storeLinks(urls) {
   if (CUR === a) select(a, null, 0);
 }
 
-function listenedLine(rank) {
-  const lis = LISTENED[rank], ap = ARTIST_PLAYS[rank];
+function listenedLine(uid) {
+  const lis = LISTENED[uid], ap = ARTIST_PLAYS[uid];
   if (lis)
     return `<div id="d-listened">♫ Escuchado ${lis.plays} ${lis.plays === 1 ? 'vez' : 'veces'}`
       + (lis.last ? ` · última: ${lis.last}` : '') + `</div>`;
@@ -1418,13 +1651,12 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
   const cards = [...document.querySelectorAll('.card')];
   if (!cards.length) return;
-  const idx  = cards.findIndex(c => +c.dataset.rank === current);
+  const idx  = cards.findIndex(c => +c.dataset.uid === current);
   const next = (e.key === 'ArrowRight' || e.key === 'ArrowDown')
     ? Math.min(idx + 1, cards.length - 1)
     : Math.max(idx - 1, 0);
   const card = cards[next];
-  const rank = +card.dataset.rank;
-  const item = ALL.find(a => (a.rank ?? 0) === rank);
+  const item = ALL[+card.dataset.uid];
   if (item) select(item, card);
 });
 
@@ -1497,12 +1729,19 @@ async function startFetch() {
   runFetch(isUrl ? id : +id);
 }
 
+// Actualiza varias partes seguidas (p. ej. Álbumes y EPs de un sello)
+function refreshParts(ids) {
+  if (!ids.length) return;
+  FETCH_QUEUE = ids.slice(1);
+  runFetch(ids[0]);
+}
+
 async function runFetch(cid) {
   fetchBtn.disabled = true;
   document.querySelectorAll('.col-refresh').forEach(b => b.disabled = true);
   setStatus('Iniciando…', 'running');
   const r = await api('/api/fetch', {collage_id: cid});
-  if (r.error) { setStatus(r.error, 'err'); fetchDone(); return; }
+  if (r.error) { setStatus(r.error, 'err'); FETCH_QUEUE = []; fetchDone(); return; }
   floatDismissed = false;
   updateFloat({running: true, id: cid});
   pollJob();
@@ -1522,16 +1761,18 @@ function pollJob() {
       setStatus('⏳ Descargando… ' + (s.log ? s.log.split('\n').pop() : ''), 'running');
       pollJob();
     } else if (s.done) {
+      if (FETCH_QUEUE.length) { runFetch(FETCH_QUEUE.shift()); return; }
       setStatus('✓ Completado', 'done');
-      // Si el chart actualizado es el que está abierto se recarga; si no, se abre
-      // solo cuando no hay otro abierto (para no cortar lo que está sonando)
-      const open   = document.querySelector('.col-item.active')?.dataset.name;
-      const target = !open || open === s.last_name ? s.last_name : null;
+      // Si lo actualizado es la fuente abierta se recarga; si hay otra abierta
+      // no se toca (para no cortar lo que está sonando)
+      const open = SRC && SRC.key;
+      const done = SOURCES.find(x => x.parts.some(p => p.name === s.last_name));
+      const target = !open || (done && done.key === open) || !done ? s.last_name : null;
       await loadList(target);
-      if (!target) document.querySelector(`.col-item[data-name="${CSS.escape(open)}"]`)?.classList.add('active');
       fetchDone();
     } else if (s.error) {
       setStatus('✗ ' + s.error.split('\n')[0], 'err');
+      FETCH_QUEUE = [];
       fetchDone();
     } else {
       fetchDone();
@@ -1588,7 +1829,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(APP_DIR, 'settings-panel.js'), 'rb') as f:
                 self._send(f.read(), 'application/javascript; charset=utf-8'); return
 
-        if path == '/api/list':
+        if path in ('/api/list', '/api/sources'):
             cols = list_collages()
             # Enrich with file metadata if not already present
             for c in cols:
@@ -1600,7 +1841,12 @@ class Handler(BaseHTTPRequestHandler):
                             c['count'] = len(json.load(f))
                     except Exception:
                         pass
+            if path == '/api/sources':
+                self._json(list_sources(cols)); return
             self._json(cols); return
+
+        if path == '/api/groups':
+            self._json(load_groups()); return
 
         if path.startswith('/api/data/'):
             name = unquote(path[len('/api/data/'):])
@@ -1648,6 +1894,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': 'URL no válida'}, 400); return
             threading.Thread(target=_run_fetch, args=(cid,), daemon=True).start()
             self._json({'ok': True}); return
+
+        if path == '/api/groups':
+            groups = d.get('groups')
+            if not isinstance(groups, list):
+                self._json({'error': 'groups requerido'}, 400); return
+            self._json({'ok': True, 'groups': save_groups(groups)}); return
 
         if path == '/api/links':
             artist = (d.get('artist') or '').strip()
