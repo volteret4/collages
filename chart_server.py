@@ -35,7 +35,9 @@ DATA_DIR     = os.environ.get('CHARTS_DATA_DIR') or APP_DIR
 os.makedirs(DATA_DIR, exist_ok=True)
 SCRIPT       = os.path.join(APP_DIR, 'yt-chart.py')
 REGISTRY     = os.path.join(DATA_DIR, 'chart_registry.json')
-_SKIP_NAMES  = {'charts_orpheus', 'chart_registry'}
+# Enlaces de vídeo aportados a mano, por artista|álbum normalizados
+CUSTOM_LINKS = os.path.join(DATA_DIR, 'custom_links.json')
+_SKIP_NAMES  = {'charts_orpheus', 'chart_registry', 'custom_links'}
 
 # ── Panel de configuración (⚙) ───────────────────────────────────────────────
 # Mismo patrón que el resto de apps.
@@ -179,6 +181,42 @@ def read_collage(name):
         return None
     with open(fp, encoding='utf-8') as f:
         return json.load(f)
+
+
+# ── Enlaces propios ───────────────────────────────────────────────────────────
+_links_lock = threading.Lock()
+
+def _link_key(artist, album):
+    return _norm(artist) + '|' + _norm(album)
+
+def load_custom_links():
+    try:
+        with open(CUSTOM_LINKS, encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+def save_custom_links(artist, album, urls):
+    """Guarda los enlaces de un álbum; una lista vacía los borra."""
+    with _links_lock:
+        links = load_custom_links()
+        key = _link_key(artist, album)
+        if urls:
+            links[key] = urls
+        else:
+            links.pop(key, None)
+        tmp = CUSTOM_LINKS + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(links, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CUSTOM_LINKS)
+
+def with_custom_links(data):
+    links = load_custom_links()
+    for a in data:
+        urls = links.get(_link_key(a.get('artist'), a.get('album')))
+        if urls:
+            a['custom'] = urls
+    return data
 
 
 _RE_PAGE  = re.compile(r'Descargando página (\d+)(?:/(\d+))?')
@@ -363,7 +401,7 @@ def get_discogs_info(artist, album):
             title = v.get('title', '')
             if url:
                 videos.append({'url': url, 'title': title})
-        out['videos'] = videos[:6]
+        out['videos'] = videos
 
         # Social / external links from Discogs (urls field if present)
         out['links'] = [
@@ -373,12 +411,21 @@ def get_discogs_info(artist, album):
     return out
 
 
+_enrich_cache = {}
+
 def enrich(artist, album):
+    # En memoria: al saltar adelante y atrás entre discos no se repiten las consultas
+    key = (artist, album)
+    if key in _enrich_cache:
+        return _enrich_cache[key]
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         lfm_f  = ex.submit(get_lastfm_info,  artist, album)
         disc_f = ex.submit(get_discogs_info, artist, album)
-        return {'lastfm': lfm_f.result(), 'discogs': disc_f.result()}
+        out = {'lastfm': lfm_f.result(), 'discogs': disc_f.result()}
+    if out['lastfm'] or out['discogs']:
+        _enrich_cache[key] = out
+    return out
 
 
 # ── Biblioteca propia (Airsonic + qBittorrent) y escuchas (Last.fm) ──────────
@@ -663,6 +710,31 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 #d-player{width:100%;aspect-ratio:16/9;border:none;display:block}
 #d-no-video{padding:14px;color:var(--border);font-size:.78rem;text-align:center;aspect-ratio:16/9;
             display:flex;align-items:center;justify-content:center}
+#d-no-video[hidden],#d-player-wrap[hidden]{display:none}
+#d-head{display:contents}
+
+#d-queue{flex-shrink:0;border-bottom:1px solid var(--border);padding:6px 13px 8px;
+         display:flex;flex-direction:column;gap:5px}
+#d-queue-head{display:flex;align-items:center;gap:6px;font-size:.58rem;font-weight:700;
+              color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em}
+#d-queue-head span{flex:1}
+.q-btn{background:var(--surface-2);color:var(--text-muted);border:1px solid var(--border);border-radius:3px;
+       font-size:.66rem;padding:2px 7px;cursor:pointer}
+.q-btn:hover{color:var(--text)}
+#q-list{max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
+.q-item{font-size:.7rem;color:var(--text-muted);cursor:pointer;padding:2px 4px;border-radius:3px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.q-item:hover{background:var(--surface-2);color:var(--text)}
+.q-item.playing{color:var(--accent-2);font-weight:600}
+.q-item.bad{text-decoration:line-through;opacity:.5}
+#q-form{display:flex;flex-direction:column;gap:4px}
+#q-form[hidden]{display:none}
+#q-urls{width:100%;min-height:52px;resize:vertical;background:var(--surface-2);color:var(--text);
+        border:1px solid var(--border);border-radius:3px;font-size:.7rem;padding:4px 6px;font-family:inherit}
+#q-form-row{display:flex;gap:5px;align-items:center}
+#q-msg{font-size:.66rem;color:var(--text-muted);flex:1}
+#q-msg.err{color:var(--danger)}
+#q-hint,.q-keys{font-size:.6rem;color:var(--text-muted)}
 
 #d-extra{flex:1;overflow-y:auto;padding:10px 13px 14px;display:flex;flex-direction:column;gap:9px}
 .d-loading{color:var(--text-muted);font-size:.74rem;text-align:center;padding:12px 0}
@@ -681,10 +753,6 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .d-credit{font-size:.7rem;color:var(--text-muted);display:flex;gap:6px}
 .d-credit-role{color:var(--text-muted);font-size:.63rem;flex-shrink:0;min-width:70px}
 .d-credit-name{color:var(--text-muted)}
-.d-videos{display:flex;flex-direction:column;gap:4px}
-.d-video-link{font-size:.72rem;color:var(--accent-2);text-decoration:none;
-              white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.d-video-link:hover{color:var(--accent-2);text-decoration:underline}
 .d-stats{font-size:.68rem;color:var(--text-muted)}
 .d-meta{font-size:.68rem;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:5px}
 .d-meta span{background:var(--surface-2);padding:1px 6px;border-radius:3px}
@@ -812,6 +880,8 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 
 <script>
 let ALL = [], current = -1, pollTimer = null, OWNED = {}, LISTENED = {}, ARTIST_PLAYS = {};
+// Reproductor: cola de vídeos del disco actual; al acabar salta al siguiente disco del grid
+let QUEUE = [], qi = -1, CUR = null, ytPlayer = null, navDir = 1, playToken = 0;
 const OWNED_LABEL = {airsonic: 'Airsonic', qbittorrent: 'qBittorrent'};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -858,8 +928,7 @@ async function loadCollage(name, sidebarEl) {
   document.getElementById('grid-wrap').style.display = '';
   document.getElementById('placeholder').style.display = 'none';
   document.getElementById('search').value = '';
-  document.getElementById('detail').innerHTML =
-    '<div id="d-placeholder">← Selecciona un álbum</div>';
+  resetDetail();
 
   OWNED = {}; LISTENED = {}; ARTIST_PLAYS = {};
   document.getElementById('owned-toggle').hidden = true;
@@ -923,10 +992,34 @@ function render(data) {
 }
 
 // ── Select album ──────────────────────────────────────────────────────────────
-function select(a, cardEl) {
+function resetDetail() {
+  if (ytPlayer) { try { ytPlayer.destroy(); } catch (e) {} ytPlayer = null; }
+  QUEUE = []; qi = -1; CUR = null;
+  document.getElementById('detail').innerHTML =
+    '<div id="d-placeholder">← Selecciona un álbum</div>';
+}
+
+// El reproductor vive fuera de lo que se repinta al cambiar de disco: un único
+// iframe que ya ha sonado puede seguir sonando sin que el navegador lo bloquee.
+function ensureDetailSkeleton() {
+  if (document.getElementById('d-player-wrap')) return;
+  document.getElementById('detail').innerHTML =
+    `<div id="d-head"></div>`
+    + `<div id="d-player-wrap" hidden><div id="d-player"></div></div>`
+    + `<div id="d-no-video">Buscando vídeos…</div>`
+    + `<div id="d-queue"></div>`
+    + `<div id="d-extra"></div>`;
+}
+
+function select(a, cardEl, dir) {
+  navDir  = dir || 0;   // 0 = elegido a mano; ±1 = avance automático o N/B
   current = a.rank ?? 0;
+  CUR     = a;
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+  if (!cardEl) cardEl = document.querySelector(`.card[data-rank="${current}"]`);
   if (cardEl) { cardEl.classList.add('active'); cardEl.scrollIntoView({block:'nearest'}); }
+
+  ensureDetailSkeleton();
 
   const cover = a.cover
     ? `<img id="d-cover" src="${esc(a.cover)}" alt="" onerror="this.style.opacity=0">`
@@ -937,15 +1030,9 @@ function select(a, cardEl) {
     : '';
 
   const ytSearchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent((a.artist||'')+' '+(a.album||'')+' full album')}`;
-  const ytBtn = a.embed
-    ? ''
-    : `<a class="d-btn d-btn-yt" href="${esc(ytSearchUrl)}" target="_blank">▶ Buscar en YouTube</a>`;
+  const ytBtn = `<a class="d-btn d-btn-yt" href="${esc(ytSearchUrl)}" target="_blank">▶ Buscar en YouTube</a>`;
 
-  const player = a.embed
-    ? `<iframe id="d-player" src="${esc(a.embed)}" allowfullscreen allow="encrypted-media"></iframe>`
-    : `<div id="d-no-video">Sin vídeo disponible</div>`;
-
-  document.getElementById('detail').innerHTML =
+  document.getElementById('d-head').innerHTML =
     `<div id="d-cover-wrap">${cover}</div>`
     + `<div id="d-info"><div id="d-rank">Puesto #${a.rank ?? '?'} de ${ALL.length}</div>`
     + `<div id="d-artist">${esc(a.artist)}</div>`
@@ -953,11 +1040,190 @@ function select(a, cardEl) {
     + (OWNED[a.rank] ? `<div id="d-owned">✓ Ya lo tienes en ${OWNED[a.rank].map(o => OWNED_LABEL[o]).join(' y ')}</div>` : '')
     + listenedLine(a.rank)
     + `</div>`
-    + `<div id="d-link">${orpheusBtn}${ytBtn}</div>`
-    + `<div id="d-player-wrap">${player}</div>`
-    + `<div id="d-extra"><div class="d-loading">Cargando info…</div></div>`;
+    + `<div id="d-link">${orpheusBtn}${ytBtn}</div>`;
+  document.getElementById('d-extra').innerHTML = '<div class="d-loading">Cargando info…</div>';
 
-  enrichDetail(a.artist, a.album);
+  // Cola inicial: los enlaces propios sustituyen a todo lo demás; si no hay,
+  // el vídeo del chart y luego (al llegar la info) los de Discogs.
+  QUEUE = []; qi = -1;
+  if (a.custom && a.custom.length) a.custom.forEach(u => addToQueue(u, '', 'propio'));
+  else if (a.youtube || a.embed) addToQueue(a.youtube || a.embed, 'Vídeo del chart', 'chart');
+  renderQueue();
+  const token = ++playToken;
+  if (QUEUE.length) playIndex(0);
+  else showNoVideo('Buscando vídeos…');
+
+  enrichDetail(a.artist, a.album, token);
+}
+
+// ── YouTube ───────────────────────────────────────────────────────────────────
+function ytParse(url) {
+  let u;
+  try { u = new URL((url || '').trim()); } catch (e) { return null; }
+  const host = u.hostname.replace(/^(www\.|m\.|music\.)/, '');
+  if (!['youtube.com', 'youtube-nocookie.com', 'youtu.be'].includes(host)) return null;
+  const list = u.searchParams.get('list');
+  let id = host === 'youtu.be' ? u.pathname.slice(1).split('/')[0] : u.searchParams.get('v');
+  const m = u.pathname.match(/^\/(?:embed|shorts|live|v)\/([\w-]{11})/);
+  if (!id && m && m[1] !== 'videoseries') id = m[1];
+  if (id && !/^[\w-]{11}$/.test(id)) id = null;
+  if (list) return {list, id};
+  return id ? {id} : null;
+}
+
+function addToQueue(url, title, src) {
+  const v = ytParse(url);
+  if (!v) return false;
+  const key = v.list || v.id;
+  if (QUEUE.some(q => (q.list || q.id) === key)) return false;
+  QUEUE.push({...v, url, title: title || '', src});
+  return true;
+}
+
+let _ytReady = null;
+function ytApi() {
+  if (!_ytReady) _ytReady = new Promise(res => {
+    window.onYouTubeIframeAPIReady = res;
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  });
+  return _ytReady;
+}
+
+function showNoVideo(msg) {
+  const wrap = document.getElementById('d-player-wrap'), nv = document.getElementById('d-no-video');
+  if (!wrap) return;
+  if (ytPlayer) { try { ytPlayer.stopVideo(); } catch (e) {} }
+  wrap.hidden = true;
+  nv.hidden = false;
+  nv.textContent = msg;
+}
+
+async function playIndex(i) {
+  if (i < 0 || i >= QUEUE.length) return;
+  qi = i;
+  const q = QUEUE[i], token = playToken;
+  renderQueue();
+  document.getElementById('d-no-video').hidden = true;
+  document.getElementById('d-player-wrap').hidden = false;
+  await ytApi();
+  if (token !== playToken || qi !== i) return;
+  const load = p => q.list
+    ? p.loadPlaylist({list: q.list, listType: 'playlist', index: 0})
+    : p.loadVideoById(q.id);
+  if (ytPlayer) { load(ytPlayer); return; }
+  ytPlayer = new YT.Player('d-player', {
+    width: '100%',
+    playerVars: {rel: 0, autoplay: 1, playsinline: 1},
+    events: {
+      onReady: e => load(e.target),
+      onStateChange: onYtState,
+      onError: onYtError,
+    },
+  });
+}
+
+function inPlaylistMiddle() {
+  // ¿El vídeo actual es una lista de YouTube y quedan canciones en ella?
+  if (!ytPlayer || qi < 0 || !QUEUE[qi] || !QUEUE[qi].list) return false;
+  const pl = ytPlayer.getPlaylist() || [];
+  return ytPlayer.getPlaylistIndex() < pl.length - 1;
+}
+
+function onYtState(e) {
+  if (e.data === YT.PlayerState.ENDED && !inPlaylistMiddle()) nextTrack();
+}
+
+function onYtError() {
+  // 100/101/150: borrado o no se puede incrustar → se marca y se sigue
+  if (qi >= 0 && QUEUE[qi]) QUEUE[qi].bad = true;
+  renderQueue();
+  nextTrack();
+}
+
+function nextTrack() {
+  if (inPlaylistMiddle()) { ytPlayer.nextVideo(); return; }
+  for (let i = qi + 1; i < QUEUE.length; i++) if (!QUEUE[i].bad) { playIndex(i); return; }
+  stepAlbum(1);
+}
+
+function prevTrack() {
+  if (ytPlayer && qi >= 0 && QUEUE[qi] && QUEUE[qi].list && ytPlayer.getPlaylistIndex() > 0) {
+    ytPlayer.previousVideo(); return;
+  }
+  for (let i = qi - 1; i >= 0; i--) if (!QUEUE[i].bad) { playIndex(i); return; }
+  stepAlbum(-1);
+}
+
+// Siguiente/anterior disco en el orden del grid (respeta búsqueda y filtros)
+function stepAlbum(dir) {
+  const cards = [...document.querySelectorAll('.card')];
+  if (!cards.length) return;
+  const idx = cards.findIndex(c => +c.dataset.rank === current);
+  const n = idx < 0 ? (dir > 0 ? 0 : cards.length - 1) : idx + dir;
+  if (n < 0 || n >= cards.length) { showNoVideo('Fin de la lista'); return; }
+  const card = cards[n], rank = +card.dataset.rank;
+  const item = ALL.find(a => (a.rank ?? 0) === rank);
+  if (item) select(item, card, dir);
+}
+
+// ── Cola y enlaces propios ────────────────────────────────────────────────────
+function renderQueue() {
+  const el = document.getElementById('d-queue');
+  if (!el || !CUR) return;
+  const own = CUR.custom && CUR.custom.length;
+  const items = QUEUE.map((q, i) => {
+    const label = q.title || (q.list ? 'Lista de YouTube' : q.url);
+    return `<div class="q-item${i === qi ? ' playing' : ''}${q.bad ? ' bad' : ''}" data-i="${i}"`
+      + ` title="${esc(q.url)}">${i === qi ? '▶' : (i + 1) + '.'} ${esc(label)}</div>`;
+  }).join('');
+  el.innerHTML =
+    `<div id="d-queue-head"><span>Vídeos${QUEUE.length ? ' (' + QUEUE.length + ')' : ''}${own ? ' · enlaces propios' : ''}</span>`
+    + `<button class="q-btn" id="q-edit" title="Aportar otro enlace">✎ Otro enlace</button></div>`
+    + `<div id="q-list">${items}</div>`
+    + `<div id="q-form" hidden>`
+    + `<textarea id="q-urls" placeholder="Enlaces de YouTube (vídeo o lista), uno por línea"></textarea>`
+    + `<div id="q-form-row"><span id="q-msg"></span>`
+    + (own ? `<button class="q-btn" id="q-reset" title="Volver a los vídeos del chart y Discogs">Quitar</button>` : '')
+    + `<button class="q-btn" id="q-cancel">Cancelar</button><button class="q-btn" id="q-save">Guardar</button></div>`
+    + `<div id="q-hint">Sustituyen a los vídeos del chart y de Discogs para este disco.</div></div>`
+    + `<div class="q-keys">N siguiente · B anterior</div>`;
+  el.querySelectorAll('.q-item').forEach(d => d.addEventListener('click', () => playIndex(+d.dataset.i)));
+  document.getElementById('q-edit').addEventListener('click', () => openLinkForm(true));
+  document.getElementById('q-cancel').addEventListener('click', () => { document.getElementById('q-form').hidden = true; });
+  document.getElementById('q-save').addEventListener('click', saveLinks);
+  if (own) document.getElementById('q-reset').addEventListener('click', () => storeLinks([]));
+}
+
+function openLinkForm(focus) {
+  const form = document.getElementById('q-form');
+  if (!form) return;
+  form.hidden = false;
+  const ta = document.getElementById('q-urls');
+  ta.value = (CUR.custom || []).join('\n');
+  if (focus) ta.focus();
+}
+
+async function saveLinks() {
+  const lines = document.getElementById('q-urls').value.split(/\s+/).filter(Boolean);
+  const bad = lines.filter(u => !ytParse(u));
+  const msg = document.getElementById('q-msg');
+  if (!lines.length) { msg.className = 'err'; msg.textContent = 'Pega al menos un enlace'; return; }
+  if (bad.length) { msg.className = 'err'; msg.textContent = 'No es de YouTube: ' + bad[0]; return; }
+  storeLinks(lines);
+}
+
+async function storeLinks(urls) {
+  const a = CUR;
+  const r = await api('/api/links', {artist: a.artist, album: a.album, urls});
+  if (r.error) {
+    const msg = document.getElementById('q-msg');
+    if (msg) { msg.className = 'err'; msg.textContent = r.error; }
+    return;
+  }
+  if (urls.length) a.custom = r.urls; else delete a.custom;
+  if (CUR === a) select(a, null, 0);
 }
 
 function listenedLine(rank) {
@@ -973,7 +1239,7 @@ function listenedLine(rank) {
 // ── Enrichment ────────────────────────────────────────────────────────────────
 let _enrichArtist = null, _enrichAlbum = null;
 
-async function enrichDetail(artist, album) {
+async function enrichDetail(artist, album, token) {
   _enrichArtist = artist; _enrichAlbum = album;
   let data;
   try {
@@ -982,6 +1248,7 @@ async function enrichDetail(artist, album) {
   } catch(e) {
     const el = document.getElementById('d-extra');
     if (el && _enrichArtist === artist) el.innerHTML = '<div class="d-loading">Error al cargar</div>';
+    if (token === playToken) queueFromDiscogs([]);
     return;
   }
   const el = document.getElementById('d-extra');
@@ -990,6 +1257,7 @@ async function enrichDetail(artist, album) {
   const lf = data.lastfm  || {};
   const dc = data.discogs || {};
   const parts = [];
+  if (token === playToken) queueFromDiscogs(dc.videos || []);
 
   // Tags
   if (lf.tags && lf.tags.length)
@@ -1040,13 +1308,6 @@ async function enrichDetail(artist, album) {
     parts.push(`<div class="d-section"><div class="d-section-title">Artistas similares</div>`
       + `<div class="d-tags">${lf.similar.map(s=>`<span class="d-tag">${esc(s)}</span>`).join('')}</div></div>`);
 
-  // Videos from Discogs
-  if (dc.videos && dc.videos.length)
-    parts.push(`<div class="d-section"><div class="d-section-title">Vídeos</div>`
-      + `<div class="d-videos">${dc.videos.map(v=>
-          `<a class="d-video-link" href="${esc(v.url)}" target="_blank">▶ ${esc(v.title||v.url)}</a>`
-        ).join('')}</div></div>`);
-
   // External links
   const extLinks = [];
   if (dc.discogs_url) extLinks.push(`<a class="d-ext-link" href="${esc(dc.discogs_url)}" target="_blank">Discogs</a>`);
@@ -1055,6 +1316,19 @@ async function enrichDetail(artist, album) {
     parts.push(`<div class="d-section" style="gap:5px">${extLinks.join('')}</div>`);
 
   el.innerHTML = parts.length ? parts.join('') : '<div class="d-loading">Sin datos adicionales</div>';
+}
+
+// Añade a la cola todos los vídeos de Discogs (salvo si hay enlaces propios)
+function queueFromDiscogs(videos) {
+  if (!CUR) return;
+  if (!(CUR.custom && CUR.custom.length)) videos.forEach(v => addToQueue(v.url, v.title, 'discogs'));
+  renderQueue();
+  if (qi >= 0) return;
+  const first = QUEUE.findIndex(q => !q.bad);
+  if (first >= 0) { playIndex(first); return; }
+  if (navDir) { stepAlbum(navDir); return; }   // en marcha: se salta el disco sin vídeos
+  showNoVideo('Sin vídeo disponible');
+  openLinkForm();
 }
 
 function fmt(n) {
@@ -1077,8 +1351,15 @@ document.getElementById('hide-listened').addEventListener('change', applyFilter)
 
 // ── Keyboard navigation ───────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (document.activeElement === document.getElementById('search') ||
-      document.activeElement === document.getElementById('fetch-id')) return;
+  const t = document.activeElement;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if ((k === 'n' || k === 'b') && CUR) {
+    e.preventDefault();
+    if (k === 'n') nextTrack(); else prevTrack();
+    return;
+  }
   if (!['ArrowRight','ArrowLeft','ArrowDown','ArrowUp'].includes(e.key)) return;
   e.preventDefault();
   const cards = [...document.querySelectorAll('.card')];
@@ -1092,6 +1373,13 @@ document.addEventListener('keydown', e => {
   const item = ALL.find(a => (a.rank ?? 0) === rank);
   if (item) select(item, card);
 });
+
+// Un clic dentro del vídeo se lleva el foco al iframe y las teclas dejan de llegar
+// aquí; se le devuelve el foco a la página para que N/B sigan funcionando.
+window.addEventListener('blur', () => setTimeout(() => {
+  const f = document.activeElement;
+  if (f && f.tagName === 'IFRAME' && f.closest('#d-player-wrap')) f.blur();
+}, 0));
 
 // ── Fetch new collage ─────────────────────────────────────────────────────────
 const fetchBtn   = document.getElementById('fetch-btn');
@@ -1249,7 +1537,7 @@ class Handler(BaseHTTPRequestHandler):
             name = unquote(path[len('/api/data/'):])
             data = read_collage(name)
             if data is None: self._json({'error': 'Not found'}, 404); return
-            self._json(data); return
+            self._json(with_custom_links(data)); return
 
         if path.startswith('/api/owned/'):
             from urllib.parse import parse_qs
@@ -1291,6 +1579,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': 'URL no válida'}, 400); return
             threading.Thread(target=_run_fetch, args=(cid,), daemon=True).start()
             self._json({'ok': True}); return
+
+        if path == '/api/links':
+            artist = (d.get('artist') or '').strip()
+            album  = (d.get('album') or '').strip()
+            urls   = [u.strip() for u in (d.get('urls') or []) if isinstance(u, str) and u.strip()]
+            if not artist or not album:
+                self._json({'error': 'artist y album requeridos'}, 400); return
+            if any(not u.startswith(('https://', 'http://')) for u in urls):
+                self._json({'error': 'Enlace no válido'}, 400); return
+            save_custom_links(artist, album, urls)
+            self._json({'ok': True, 'urls': urls}); return
 
         if path == '/api/settings':
             password = d.get('password') or ''
