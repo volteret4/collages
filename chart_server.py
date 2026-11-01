@@ -115,8 +115,32 @@ def _check_auth(password):
     return password == SETTINGS_PASSWORD
 
 _job      = {'running': False, 'id': None, 'last_name': None, 'error': None, 'done': False, 'log': '',
-             'name': None, 'page': None, 'pages': None, 'total': None, 'processed': 0, 'current': None}
+             'name': None, 'page': None, 'pages': None, 'total': None, 'processed': 0, 'current': None,
+             'finished': 0, 'queue': []}
 _job_lock = threading.Lock()
+
+
+def _fetch_worker(cid):
+    """Descarga cid y después todo lo que se haya ido encolando mientras tanto."""
+    while cid is not None:
+        _run_fetch(cid)
+        with _job_lock:
+            _job['finished'] += 1
+            cid = _job['queue'].pop(0) if _job['queue'] else None
+            if cid is not None:
+                _job['running'] = True   # sin hueco entre una tarea y la siguiente
+
+
+def enqueue_fetch(cid):
+    """Arranca la descarga o la deja en cola. Devuelve la posición en la cola (0 = ya empieza)."""
+    with _job_lock:
+        if _job['running']:
+            if cid != _job['id'] and cid not in _job['queue']:
+                _job['queue'].append(cid)
+            return _job['queue'].index(cid) + 1 if cid in _job['queue'] else 0
+        _job['running'] = True
+    threading.Thread(target=_fetch_worker, args=(cid,), daemon=True).start()
+    return 0
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -726,10 +750,9 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 #fetch-btn:hover{background:var(--danger)}
 #fetch-btn:disabled{background:var(--text-muted);cursor:not-allowed}
 
-#job-status{margin-top:8px;font-size:.72rem;min-height:1.2em}
-#job-status.running{color:var(--warning)}
-#job-status.done{color:var(--success)}
-#job-status.err{color:var(--danger)}
+#fetch-id.invalid{border-color:var(--danger)}
+#jf-queue{color:var(--text-muted);font-size:.7rem}
+#jf-queue:empty{display:none}
 
 /* ── Main area ── */
 #main{flex:1;display:flex;overflow:hidden;min-width:0}
@@ -954,7 +977,6 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
       <input id="fetch-id" type="text" placeholder="ID de collage o URL de búsqueda…">
       <button id="fetch-btn">Obtener</button>
     </div>
-    <div id="job-status"></div>
   </div>
 </div>
 
@@ -966,6 +988,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
   <div id="jf-phase"><span id="jf-phase-txt"></span><span id="jf-pct"></span></div>
   <div id="jf-bar"><div id="jf-fill"></div></div>
   <div id="jf-current"></div>
+  <div id="jf-queue"></div>
   <pre id="jf-log"></pre>
 </div>
 
@@ -1010,7 +1033,7 @@ async function api(ep, body) {
 
 // ── Barra lateral: fuentes (sello o collage) y grupos ─────────────────────────
 // Una fuente agrupa los charts de un mismo sello («Kranky · Album», «Kranky · EP»…)
-let SOURCES = [], GROUPS = [], SRC = null, loadToken = 0, FETCH_QUEUE = [];
+let SOURCES = [], GROUPS = [], SRC = null, loadToken = 0, lastFinished = null;
 const COLLAPSED = new Set(JSON.parse(localStorage.getItem('charts-collapsed') || '[]'));
 const RTYPE_LABEL = {
   'Album': 'Álbumes', 'EP': 'EPs', 'Single': 'Singles', 'Compilation': 'Recopilatorios',
@@ -1670,12 +1693,14 @@ window.addEventListener('blur', () => setTimeout(() => {
 // ── Fetch new collage ─────────────────────────────────────────────────────────
 const fetchBtn   = document.getElementById('fetch-btn');
 const fetchInput = document.getElementById('fetch-id');
-const statusEl   = document.getElementById('job-status');
 
-function setStatus(msg, cls) {
-  statusEl.className = cls || '';
-  statusEl.textContent = msg;
+// Sin log junto a la caja: los avisos van al propio campo
+function inputError(msg) {
+  fetchInput.classList.add('invalid');
+  fetchInput.setCustomValidity(msg);
+  fetchInput.reportValidity();
 }
+fetchInput.addEventListener('input', () => { fetchInput.classList.remove('invalid'); fetchInput.setCustomValidity(''); });
 
 // ── Cuadro flotante de progreso ───────────────────────────────────────────────
 const jobFloat = document.getElementById('job-float');
@@ -1686,6 +1711,14 @@ document.getElementById('jf-close').addEventListener('click', () => {
   jobFloat.hidden = true;
 });
 
+// Nombre legible de algo encolado: el chart si ya se conoce, si no la URL/ID
+function queueLabel(cid) {
+  for (const x of SOURCES) for (const p of x.parts)
+    if (p.id === cid) return x.name + (p.rtype ? ' · ' + (RTYPE_LABEL[p.rtype] || p.rtype) : '');
+  const m = String(cid).match(/remasterrecordlabel=([^&]+)/);
+  return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : String(cid);
+}
+
 function updateFloat(s) {
   if (floatDismissed) return;
   clearTimeout(floatHideTimer);
@@ -1695,6 +1728,9 @@ function updateFloat(s) {
   const title = document.getElementById('jf-title');
   title.className   = state;
   title.textContent = s.running ? '⏳ Añadiendo…' : s.done ? '✓ Completado' : s.error ? '✗ Error' : '';
+  const q = s.queue || [];
+  document.getElementById('jf-queue').textContent = q.length
+    ? `En cola (${q.length}): ` + q.map(c => queueLabel(c)).join(' · ') : '';
 
   document.getElementById('jf-name').textContent = s.name || s.last_name || String(s.id ?? '');
 
@@ -1719,65 +1755,47 @@ function updateFloat(s) {
   const log = document.getElementById('jf-log');
   log.textContent = (s.log || '').split('\n').slice(-6).join('\n');
 
-  if (s.done) floatHideTimer = setTimeout(() => { jobFloat.hidden = true; }, 8000);
+  if (s.done && !q.length) floatHideTimer = setTimeout(() => { jobFloat.hidden = true; }, 8000);
 }
 
+// Se pueden pegar varias URL/ID a la vez (separadas por espacios o saltos de línea)
 async function startFetch() {
-  const id = fetchInput.value.trim();
-  const isUrl = /^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id);
-  if (!id || (!isUrl && isNaN(+id))) { setStatus('Introduce un ID o URL válida', 'err'); return; }
-  runFetch(isUrl ? id : +id);
+  const items = fetchInput.value.trim().split(/\s+|(?=https?:\/\/)/).filter(Boolean);
+  if (!items.length) { inputError('Introduce un ID o URL'); return; }
+  const bad = items.find(id => !/^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id) && isNaN(+id));
+  if (bad) { inputError('No es un ID ni una URL de Orpheus: ' + bad); return; }
+  fetchInput.value = '';
+  for (const id of items) await runFetch(isNaN(+id) ? id : +id);
 }
 
-// Actualiza varias partes seguidas (p. ej. Álbumes y EPs de un sello)
-function refreshParts(ids) {
-  if (!ids.length) return;
-  FETCH_QUEUE = ids.slice(1);
-  runFetch(ids[0]);
+// Actualiza varias partes (p. ej. Álbumes y EPs de un sello); el servidor las encola
+async function refreshParts(ids) {
+  for (const id of ids) await runFetch(id);
 }
 
 async function runFetch(cid) {
-  fetchBtn.disabled = true;
-  document.querySelectorAll('.col-refresh').forEach(b => b.disabled = true);
-  setStatus('Iniciando…', 'running');
   const r = await api('/api/fetch', {collage_id: cid});
-  if (r.error) { setStatus(r.error, 'err'); FETCH_QUEUE = []; fetchDone(); return; }
+  if (r.error) { inputError(r.error); return; }
   floatDismissed = false;
-  updateFloat({running: true, id: cid});
-  pollJob();
+  pollJob(0);
 }
 
-function fetchDone() {
-  fetchBtn.disabled = false;
-  document.querySelectorAll('.col-refresh').forEach(b => b.disabled = false);
-}
-
-function pollJob() {
+function pollJob(delay = 1000) {
   clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
     const s = await api('/api/job');
     updateFloat(s);
-    if (s.running) {
-      setStatus('⏳ Descargando… ' + (s.log ? s.log.split('\n').pop() : ''), 'running');
-      pollJob();
-    } else if (s.done) {
-      if (FETCH_QUEUE.length) { runFetch(FETCH_QUEUE.shift()); return; }
-      setStatus('✓ Completado', 'done');
-      // Si lo actualizado es la fuente abierta se recarga; si hay otra abierta
-      // no se toca (para no cortar lo que está sonando)
-      const open = SRC && SRC.key;
+    const pending = s.running || (s.queue && s.queue.length);
+    // Cada vez que termina una tarea se refresca la barra lateral. La fuente
+    // abierta solo se recarga si no hay nada sonando, para no cortarlo.
+    if (lastFinished !== null && s.finished !== lastFinished && (s.done || s.error)) {
       const done = SOURCES.find(x => x.parts.some(p => p.name === s.last_name));
-      const target = !open || (done && done.key === open) || !done ? s.last_name : null;
-      await loadList(target);
-      fetchDone();
-    } else if (s.error) {
-      setStatus('✗ ' + s.error.split('\n')[0], 'err');
-      FETCH_QUEUE = [];
-      fetchDone();
-    } else {
-      fetchDone();
+      const reopen = s.last_name && (!SRC || (!CUR && (!done || done.key === SRC.key)));
+      await loadList(reopen ? s.last_name : null);
     }
-  }, 1000);
+    lastFinished = s.finished;
+    if (pending) pollJob();
+  }, delay);
 }
 
 fetchBtn.addEventListener('click', startFetch);
@@ -1786,7 +1804,7 @@ fetchInput.addEventListener('keydown', e => { if (e.key === 'Enter') startFetch(
 // ── Boot ──────────────────────────────────────────────────────────────────────
 loadList();
 // Si se recarga la página con una descarga en curso, retomar el seguimiento
-api('/api/job').then(s => { if (s.running) { fetchBtn.disabled = true; pollJob(); } });
+api('/api/job').then(s => { lastFinished = s.finished; if (s.running || (s.queue && s.queue.length)) pollJob(); });
 </script>
 <script src="/theme-picker.js"></script>
 <script src="/settings-panel.js"></script>
@@ -1862,7 +1880,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(owned_in_collage(name, refresh)); return
 
         if path == '/api/job':
-            with _job_lock: status = dict(_job)
+            with _job_lock: status = {**_job, 'queue': list(_job['queue'])}
             self._json(status); return
 
         if path == '/api/enrich':
@@ -1884,16 +1902,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'error': str(e)}, 400); return
 
         if path == '/api/fetch':
-            with _job_lock:
-                if _job['running']:
-                    self._json({'error': 'Ya hay una tarea en curso'}); return
             cid = d.get('collage_id')
             if not cid:
                 self._json({'error': 'collage_id requerido'}, 400); return
             if isinstance(cid, str) and not cid.startswith('https://orpheus.network/'):
                 self._json({'error': 'URL no válida'}, 400); return
-            threading.Thread(target=_run_fetch, args=(cid,), daemon=True).start()
-            self._json({'ok': True}); return
+            self._json({'ok': True, 'queued': enqueue_fetch(cid)}); return
 
         if path == '/api/groups':
             groups = d.get('groups')
