@@ -787,7 +787,14 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .card{position:relative;cursor:pointer;border-radius:4px;overflow:hidden;
       aspect-ratio:1;background:var(--surface-2);transition:transform .15s,box-shadow .15s}
 .card:hover{transform:scale(1.05);box-shadow:0 6px 22px rgba(0,0,0,.7);z-index:2}
-.card.active{outline:2px solid var(--text);transform:scale(1.04)}
+.card{transition:transform .15s,box-shadow .15s,opacity .2s}
+/* El disco seleccionado: borde de color, brillo y algo más grande; el resto se apaga un poco */
+.card.active{outline:3px solid var(--accent);outline-offset:2px;transform:scale(1.08);z-index:3;
+             box-shadow:0 0 0 6px color-mix(in srgb,var(--accent) 25%,transparent),0 8px 26px rgba(0,0,0,.8)}
+.card.active .rank{background:var(--accent);font-size:.66rem}
+.card.active .rank::before{content:'▶ '}
+#grid.has-active .card:not(.active){opacity:.55}
+#grid.has-active .card:not(.active):hover{opacity:1}
 .card img{width:100%;height:100%;object-fit:cover;display:block}
 .no-cover{width:100%;height:100%;display:flex;align-items:center;
           justify-content:center;font-size:2rem;color:var(--border)}
@@ -814,7 +821,9 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 
 /* ── Detail panel ── */
 #detail{width:300px;min-width:260px;background:var(--surface);border-left:1px solid var(--border);
-        display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
+        display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;flex-shrink:0}
+/* Todo el panel hace scroll: ningún bloque se encoge para caber */
+#detail > *,#d-head > *{flex-shrink:0}
 #d-placeholder{flex:1;display:flex;align-items:center;justify-content:center;
                color:var(--border);font-size:.88rem;text-align:center;padding:20px}
 
@@ -841,7 +850,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .d-btn-yt:hover{background:var(--danger)}
 
 #d-player-wrap{background:#000;flex-shrink:0}
-#d-player{width:100%;aspect-ratio:16/9;border:none;display:block}
+#d-player{width:100%;height:auto;aspect-ratio:16/9;border:none;display:block}
 #d-no-video{padding:14px;color:var(--border);font-size:.78rem;text-align:center;aspect-ratio:16/9;
             display:flex;align-items:center;justify-content:center}
 #d-no-video[hidden],#d-player-wrap[hidden]{display:none}
@@ -856,7 +865,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
        font-size:.66rem;padding:2px 7px;cursor:pointer}
 .q-btn:hover{color:var(--text)}
 #q-list{max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:1px}
-.q-item{font-size:.7rem;color:var(--text-muted);cursor:pointer;padding:2px 4px;border-radius:3px;
+.q-item{font-size:.7rem;color:var(--text-muted);cursor:pointer;padding:2px 4px;border-radius:3px;flex-shrink:0;
         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .q-item:hover{background:var(--surface-2);color:var(--text)}
 .q-item.playing{color:var(--accent-2);font-weight:600}
@@ -870,7 +879,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 #q-msg.err{color:var(--danger)}
 #q-hint,.q-keys{font-size:.6rem;color:var(--text-muted)}
 
-#d-extra{flex:1;overflow-y:auto;padding:10px 13px 14px;display:flex;flex-direction:column;gap:9px}
+#d-extra{padding:10px 13px 14px;display:flex;flex-direction:column;gap:9px}
 .d-loading{color:var(--text-muted);font-size:.74rem;text-align:center;padding:12px 0}
 .d-section{display:flex;flex-direction:column;gap:4px}
 .d-section-title{font-size:.58rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;
@@ -1283,6 +1292,7 @@ function card(a) {
 function resetDetail() {
   if (ytPlayer) { try { ytPlayer.destroy(); } catch (e) {} ytPlayer = null; }
   QUEUE = []; qi = -1; CUR = null;
+  document.getElementById('grid').classList.remove('has-active');
   document.getElementById('detail').innerHTML =
     '<div id="d-placeholder">← Selecciona un álbum</div>';
 }
@@ -1304,6 +1314,7 @@ function select(a, cardEl, dir) {
   current = a.uid;
   CUR     = a;
   document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+  document.getElementById('grid').classList.add('has-active');
   if (!cardEl) cardEl = document.querySelector(`.card[data-uid="${current}"]`);
   if (cardEl) { cardEl.classList.add('active'); cardEl.scrollIntoView({block:'nearest'}); }
 
