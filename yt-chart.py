@@ -6,6 +6,7 @@ import subprocess
 import sopsdotenv
 import os
 import argparse
+import datetime
 import html
 from urllib.parse import urlparse, parse_qsl
 
@@ -480,11 +481,26 @@ def update_album(album_id, yt_url, yt_id, cover):
 # MAIN
 # -------------------------
 
+def album_key(a):
+    return f"{a.get('artist')}|{a.get('album')}".casefold()
+
+
+def read_previous(collage_name):
+    """Lo que había en el chart antes de esta descarga, o None si es nuevo."""
+    try:
+        with open(f"{collage_name}.json", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def main():
     init_db()
     parser = argparse.ArgumentParser(description="mustdiscover — comparación entre usuarios")
     parser.add_argument("--id",           type=int)
     parser.add_argument("--url",          help="URL de collage o de búsqueda (torrents.php?...)")
+    parser.add_argument("--full",         action="store_true",
+                        help="Revisa también portadas y vídeos que falten de los discos que ya estaban")
 
     args = parser.parse_args()
 
@@ -510,6 +526,10 @@ def main():
     print(f"Nombre: {collage_name}")
     print(f"Total álbumes: {len(albums)}")
 
+    previous = read_previous(collage_name)
+    if not albums and previous:
+        raise SystemExit("Orpheus no ha devuelto ningún disco; el chart se queda como estaba")
+
     # Usamos un context manager (with) para asegurar que se cierre y guarde
     with db() as con:
         cur = con.cursor()
@@ -528,22 +548,27 @@ def main():
     for a in albums:
         artist_id = get_or_create_artist(a["artist"])
         album_id, yt, stored_cover = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
+        # Disco sin procesar todavía: nuevo o una descarga anterior se cortó antes de terminarlo
+        unseen = not yt and not stored_cover
 
         # Portada: primero Cover Art Archive (los hotlinks de Orpheus caducan a
         # menudo); la de Orpheus queda como respaldo (orig_cover_url)
         orig  = a["cover"]
-        cover = stored_cover if "coverartarchive.org" in (stored_cover or "") else None
-        if not cover:
-            cover = musicbrainz_cover(a["artist"], a["album"])
-            if cover:
-                print(f"  ↳ Portada Cover Art Archive: {cover}")
-        if not cover:
-            cover = orig if cover_ok(orig) else (stored_cover or orig)
+        if args.full or not stored_cover:
+            cover = stored_cover if "coverartarchive.org" in (stored_cover or "") else None
+            if not cover:
+                cover = musicbrainz_cover(a["artist"], a["album"])
+                if cover:
+                    print(f"  ↳ Portada Cover Art Archive: {cover}")
+            if not cover:
+                cover = orig if cover_ok(orig) else (stored_cover or orig)
+        else:
+            cover = stored_cover
         a["cover"] = cover
         if cover != stored_cover or orig:
             update_cover(album_id, cover, orig)
 
-        if not yt:
+        if not yt and (args.full or unseen):
             yt_url, yt_id = discogs_youtube_url(a["artist"], a["album"])
             if yt_url:
                 print(f"  ↳ Discogs video: {yt_id}")
@@ -563,7 +588,7 @@ def main():
 
         print(f"{a['rank']}. {a['artist']} - {a['album']}")
 
-    export_json(collage_name)
+    export_json(collage_name, previous)
     generate_html(collage_name)
 
 
@@ -571,7 +596,7 @@ def main():
 # EXPORT
 # -------------------------
 
-def export_json(collage_name):
+def export_json(collage_name, previous=None):
     con = db()
     cur = con.cursor()
 
@@ -600,6 +625,27 @@ def export_json(collage_name):
     ]
 
     con.close()
+
+    # Lo que entra se marca con la fecha para poder señalarlo en el grid; en un
+    # chart recién creado no se marca nada, porque todo sería nuevo
+    if previous is not None:
+        old = {album_key(a): a for a in previous}
+        today = str(datetime.date.today())
+        added = []
+        for d in data:
+            before = old.get(album_key(d))
+            if before is None:
+                d["added"] = today
+                added.append(d)
+            elif before.get("added"):
+                d["added"] = before["added"]
+        current = {album_key(d) for d in data}
+        removed = [a for k, a in old.items() if k not in current]
+        print(f"Novedades: +{len(added)} -{len(removed)}")
+        for d in added:
+            print(f"  + {d['artist']} - {d['album']}")
+        for a in removed:
+            print(f"  - {a.get('artist')} - {a.get('album')}")
 
     with open(f"{collage_name}.json", "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

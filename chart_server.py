@@ -116,8 +116,12 @@ def _check_auth(password):
 
 _job      = {'running': False, 'id': None, 'last_name': None, 'error': None, 'done': False, 'log': '',
              'name': None, 'page': None, 'pages': None, 'total': None, 'processed': 0, 'current': None,
-             'finished': 0, 'queue': []}
+             'finished': 0, 'queue': [], 'added': 0, 'removed': 0,
+             # Suma de la tanda (todo lo encolado seguido), para el resumen final
+             'batch_checked': 0, 'batch_added': 0, 'batch_removed': 0}
 _job_lock = threading.Lock()
+# Lo encolado con revisión completa de portadas y vídeos
+_full_ids = set()
 
 
 def _fetch_worker(cid):
@@ -131,14 +135,16 @@ def _fetch_worker(cid):
                 _job['running'] = True   # sin hueco entre una tarea y la siguiente
 
 
-def enqueue_fetch(cid):
+def enqueue_fetch(cid, full=False):
     """Arranca la descarga o la deja en cola. Devuelve la posición en la cola (0 = ya empieza)."""
     with _job_lock:
+        if full:
+            _full_ids.add(cid)
         if _job['running']:
             if cid != _job['id'] and cid not in _job['queue']:
                 _job['queue'].append(cid)
             return _job['queue'].index(cid) + 1 if cid in _job['queue'] else 0
-        _job['running'] = True
+        _job.update(running=True, batch_checked=0, batch_added=0, batch_removed=0)
     threading.Thread(target=_fetch_worker, args=(cid,), daemon=True).start()
     return 0
 
@@ -157,13 +163,13 @@ def save_registry(entries):
     with open(REGISTRY, 'w', encoding='utf-8') as f:
         json.dump(entries, f, ensure_ascii=False, indent=2)
 
-def register_collage(collage_id, name, count):
+def register_collage(collage_id, name, count, added=0):
     import datetime
     reg = load_registry()
     # Update existing entry or append new one
     for e in reg:
         if e['name'] == name:
-            e.update(id=collage_id, count=count, updated=str(datetime.date.today()))
+            e.update(id=collage_id, count=count, updated=str(datetime.date.today()), last_added=added)
             save_registry(reg)
             return
     reg.insert(0, {
@@ -228,6 +234,7 @@ def list_sources(cols):
         src['parts'].sort(key=lambda p: _RTYPES.index(p['rtype']) if p['rtype'] in _RTYPES else -1)
         src['count']   = sum(p.get('count') or 0 for p in src['parts'])
         src['updated'] = max((p.get('updated') or p.get('fetched') or '' for p in src['parts']), default='')
+        src['last_added'] = sum(p.get('last_added') or 0 for p in src['parts'])
     return sorted(sources.values(), key=lambda s: s['name'].lower())
 
 
@@ -302,6 +309,7 @@ _RE_PAGE  = re.compile(r'Descargando página (\d+)(?:/(\d+))?')
 _RE_NAME  = re.compile(r'Nombre: (.+)$')
 _RE_TOTAL = re.compile(r'Total álbumes: (\d+)')
 _RE_ALBUM = re.compile(r'^(\d+)\. (.+)$')
+_RE_NEWS  = re.compile(r'^Novedades: \+(\d+) -(\d+)$')
 _LOG_TAIL = 200
 
 
@@ -315,6 +323,10 @@ def _parse_progress(line):
         _job['total'] = int(m.group(1))
     elif m := _RE_ALBUM.match(line):
         _job.update(processed=int(m.group(1)), current=m.group(2))
+    elif m := _RE_NEWS.match(line):
+        added, removed = int(m.group(1)), int(m.group(2))
+        _job.update(added=added, removed=removed, batch_checked=_job['batch_checked'] + 1,
+                    batch_added=_job['batch_added'] + added, batch_removed=_job['batch_removed'] + removed)
 
 
 def _run_fetch(collage_id):
@@ -322,7 +334,9 @@ def _run_fetch(collage_id):
     with _job_lock:
         _job.update(running=True, id=collage_id, last_name=None,
                     error=None, done=False, log='', name=None, page=None,
-                    pages=None, total=None, processed=0, current=None)
+                    pages=None, total=None, processed=0, current=None, added=0, removed=0)
+        full = collage_id in _full_ids
+        _full_ids.discard(collage_id)
 
     # Snapshot JSON files before fetch to detect the new one
     before = {os.path.basename(f) for f in glob.glob(os.path.join(DATA_DIR, '*.json'))}
@@ -331,7 +345,8 @@ def _run_fetch(collage_id):
         # -u: sin buffer, para ir leyendo el progreso en vivo
         proc = subprocess.Popen(
             [sys.executable, '-u', SCRIPT,
-             '--url' if str(collage_id).startswith('http') else '--id', str(collage_id)],
+             '--url' if str(collage_id).startswith('http') else '--id', str(collage_id)]
+            + (['--full'] if full else []),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=DATA_DIR
         )
         lines = []
@@ -359,10 +374,12 @@ def _run_fetch(collage_id):
         # Lo que haya cambiado en Discogs se vuelve a consultar
         _enrich_cache.clear()
 
-        if new_name:
+        if new_name and proc.returncode == 0:
             data = read_collage(new_name)
             if data:
-                register_collage(collage_id, new_name, len(data))
+                with _job_lock:
+                    added = _job['added']
+                register_collage(collage_id, new_name, len(data), added)
 
         if proc.returncode == 0:
             with _job_lock:
@@ -798,6 +815,10 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
 .card img{width:100%;height:100%;object-fit:cover;display:block}
 .no-cover{width:100%;height:100%;display:flex;align-items:center;
           justify-content:center;font-size:2rem;color:var(--border)}
+.new-badge{position:absolute;bottom:4px;left:4px;background:var(--accent);color:var(--text);font-size:.56rem;
+           font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.04em;line-height:1.4}
+.col-new{color:var(--success);font-weight:700}
+#full-refresh[hidden]{display:none}
 .rank{position:absolute;top:4px;left:4px;background:rgba(0,0,0,.78);
       color:var(--text);font-size:.58rem;font-weight:700;padding:2px 5px;border-radius:3px}
 .badges{position:absolute;top:4px;right:4px;display:flex;gap:3px;align-items:center}
@@ -1010,6 +1031,7 @@ body{background:var(--bg);color:var(--text);font-family:"Segoe UI",system-ui,san
         <input id="hide-owned" type="checkbox"> Ocultar los que tengo</label>
       <label id="listened-toggle" hidden title="Ocultar los que ya has escuchado según Last.fm / ListenBrainz">
         <input id="hide-listened" type="checkbox"> Ocultar escuchados</label>
+      <button id="full-refresh" class="q-btn" hidden title="Vuelve a mirar portadas y busca los vídeos que falten en todos los discos. Puede tardar bastante">Revisar portadas y vídeos</button>
       <span id="grid-count"></span>
     </div>
     <div id="grid-wrap" style="display:none"><div id="grid"></div></div>
@@ -1104,18 +1126,28 @@ function sourceItem(src, inGroup) {
   const types = src.parts.length > 1 || src.parts[0].rtype
     ? src.parts.map(p => `${p.count || 0} ${RTYPE_SHORT[p.rtype] || (p.rtype || 'todo').toLowerCase()}`).join(' · ')
     : `${src.count} álb.`;
-  const canRefresh = src.parts.some(p => p.id);
+  const ids = src.parts.filter(p => p.id).map(p => p.id);
   div.innerHTML = `<div class="col-main"><span class="col-name">${esc(src.name)}</span>`
-    + `<span class="col-count">${esc(types)}${src.updated ? ' · ' + esc(src.updated) : ''}</span></div>`
-    + (canRefresh ? `<button class="col-refresh" title="Actualizar desde Orpheus (portadas y vídeos incluidos)">↻</button>` : '')
+    + `<span class="col-count">${esc(types)}${src.updated ? ' · ' + esc(src.updated) : ''}`
+    + (src.last_added ? ` · <span class="col-new" title="Añadidos en la última actualización">+${src.last_added}</span>` : '')
+    + `</span></div>`
+    + `<button class="col-refresh" title="${ids.length ? 'Buscar novedades en Orpheus' : 'Este chart no guarda su enlace: indícalo para poder actualizarlo'}">↻</button>`
     + `<button class="col-menu" title="Grupos">⋯</button>`;
   div.addEventListener('click', () => loadSource(src.key));
-  if (canRefresh) div.querySelector('.col-refresh').addEventListener('click', e => {
+  div.querySelector('.col-refresh').addEventListener('click', e => {
     e.stopPropagation();
-    refreshParts(src.parts.filter(p => p.id).map(p => p.id));
+    if (ids.length) refreshParts(ids); else linkSource(src);
   });
   div.querySelector('.col-menu').addEventListener('click', e => { e.stopPropagation(); openGroupMenu(src, e.currentTarget); });
   return div;
+}
+
+// Charts antiguos sin enlace guardado: se actualizan al indicar de dónde salieron
+function linkSource(src) {
+  const v = (prompt(`«${src.name}» no guarda su enlace.\nPega la URL de Orpheus o el ID del collage:`) || '').trim();
+  if (!v) return;
+  if (!isOrpheusRef(v)) { alert('No es un ID ni una URL de Orpheus: ' + v); return; }
+  runFetch(isNaN(+v) ? v : +v);
 }
 
 // ── Grupos ────────────────────────────────────────────────────────────────────
@@ -1190,6 +1222,7 @@ async function loadSource(key) {
   document.getElementById('grid-wrap').style.display = '';
   document.getElementById('placeholder').style.display = 'none';
   document.getElementById('search').value = '';
+  document.getElementById('full-refresh').hidden = !src.parts.some(p => p.id);
   resetDetail();
 
   OWNED = {}; LISTENED = {}; ARTIST_PLAYS = {};
@@ -1256,7 +1289,7 @@ function render(data) {
     if (withHeads)
       sec.innerHTML = `<div class="sec-head"><span>${esc(RTYPE_LABEL[p.rtype] || p.rtype || 'Todo')}</span>`
         + `<span class="sec-n">${items.length}</span>`
-        + (p.id ? `<button class="sec-refresh col-refresh" title="Actualizar solo esta sección">↻</button>` : '')
+        + (p.id ? `<button class="sec-refresh col-refresh" title="Buscar novedades solo en esta sección">↻</button>` : '')
         + `</div>`;
     const g = document.createElement('div');
     g.className = 'sec-grid';
@@ -1265,6 +1298,11 @@ function render(data) {
     if (withHeads && p.id) sec.querySelector('.sec-refresh').addEventListener('click', () => refreshParts([p.id]));
     grid.appendChild(sec);
   }
+}
+
+// La marca NUEVO dura un mes desde que el disco entró en el chart
+function isRecent(date) {
+  return !!date && Date.now() - Date.parse(date) < 30 * 864e5;
 }
 
 function card(a) {
@@ -1281,6 +1319,7 @@ function card(a) {
   card.dataset.ownedAlbum  = a.album || '';
   card.innerHTML = img + `<div class="badges" data-owned-slot></div>`
     + `<div class="rank">#${a.rank ?? '?'}</div>`
+    + (isRecent(a.added) ? `<div class="new-badge" title="Añadido el ${esc(a.added)}">NUEVO</div>` : '')
     + `<div class="hover-info"><div class="hi-artist">${esc(a.artist)}</div>`
     + `<div class="hi-album">${esc(a.album)}</div></div>`;
 
@@ -1730,6 +1769,14 @@ function queueLabel(cid) {
   return m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : String(cid);
 }
 
+function newsSummary(s) {
+  if (!s.batch_checked) return 'Completado';
+  const parts = [];
+  if (s.batch_added) parts.push(`${s.batch_added} nuevo${s.batch_added > 1 ? 's' : ''}`);
+  if (s.batch_removed) parts.push(`${s.batch_removed} ya no está${s.batch_removed > 1 ? 'n' : ''}`);
+  return parts.join(' · ') || 'Sin novedades';
+}
+
 function updateFloat(s) {
   if (floatDismissed) return;
   clearTimeout(floatHideTimer);
@@ -1738,7 +1785,7 @@ function updateFloat(s) {
   const state = s.running ? '' : s.done ? 'done' : s.error ? 'err' : '';
   const title = document.getElementById('jf-title');
   title.className   = state;
-  title.textContent = s.running ? '⏳ Añadiendo…' : s.done ? '✓ Completado' : s.error ? '✗ Error' : '';
+  title.textContent = s.running ? '⏳ Actualizando…' : s.done ? '✓ ' + newsSummary(s) : s.error ? '✗ Error' : '';
   const q = s.queue || [];
   document.getElementById('jf-queue').textContent = q.length
     ? `En cola (${q.length}): ` + q.map(c => queueLabel(c)).join(' · ') : '';
@@ -1769,23 +1816,32 @@ function updateFloat(s) {
   if (s.done && !q.length) floatHideTimer = setTimeout(() => { jobFloat.hidden = true; }, 8000);
 }
 
+function isOrpheusRef(id) {
+  return /^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id) || !isNaN(+id);
+}
+
 // Se pueden pegar varias URL/ID a la vez (separadas por espacios o saltos de línea)
 async function startFetch() {
   const items = fetchInput.value.trim().split(/\s+|(?=https?:\/\/)/).filter(Boolean);
   if (!items.length) { inputError('Introduce un ID o URL'); return; }
-  const bad = items.find(id => !/^https?:\/\/[^ ]*orpheus\.network\/(torrents|collages)\.php\?/.test(id) && isNaN(+id));
+  const bad = items.find(id => !isOrpheusRef(id));
   if (bad) { inputError('No es un ID ni una URL de Orpheus: ' + bad); return; }
   fetchInput.value = '';
   for (const id of items) await runFetch(isNaN(+id) ? id : +id);
 }
 
 // Actualiza varias partes (p. ej. Álbumes y EPs de un sello); el servidor las encola
-async function refreshParts(ids) {
-  for (const id of ids) await runFetch(id);
+async function refreshParts(ids, full = false) {
+  for (const id of ids) await runFetch(id, full);
 }
 
-async function runFetch(cid) {
-  const r = await api('/api/fetch', {collage_id: cid});
+document.getElementById('full-refresh').addEventListener('click', () => {
+  const ids = SRC ? SRC.parts.filter(p => p.id).map(p => p.id) : [];
+  if (ids.length && confirm(`¿Revisar portadas y vídeos de todo «${SRC.name}»? Puede tardar bastante.`)) refreshParts(ids, true);
+});
+
+async function runFetch(cid, full = false) {
+  const r = await api('/api/fetch', {collage_id: cid, full});
   if (r.error) { inputError(r.error); return; }
   floatDismissed = false;
   pollJob(0);
@@ -1819,11 +1875,22 @@ api('/api/job').then(s => { lastFinished = s.finished; if (s.running || (s.queue
 </script>
 <script src="/theme-picker.js"></script>
 <script src="/settings-panel.js"></script>
+<script src="/charts-switch.js"></script>
 </body>
 </html>"""
 
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
+def switch_items():
+    """Servicios del selector, de CHARTS_SWITCH=Nombre:puerto,Nombre:puerto (vacío: sin selector)."""
+    items = []
+    for part in os.environ.get('CHARTS_SWITCH', '').split(','):
+        label, _, port = part.strip().rpartition(':')
+        if label and port.isdigit():
+            items.append({'label': label, 'port': int(port), 'current': int(port) == PORT})
+    return items
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_): pass
 
@@ -1857,6 +1924,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/settings-panel.js':
             with open(os.path.join(APP_DIR, 'settings-panel.js'), 'rb') as f:
                 self._send(f.read(), 'application/javascript; charset=utf-8'); return
+
+        if path == '/charts-switch.js':
+            with open(os.path.join(APP_DIR, 'charts-switch.js'), 'rb') as f:
+                self._send(f.read(), 'application/javascript; charset=utf-8'); return
+
+        if path == '/api/switch':
+            self._json(switch_items()); return
 
         if path in ('/api/list', '/api/sources'):
             cols = list_collages()
@@ -1918,7 +1992,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({'error': 'collage_id requerido'}, 400); return
             if isinstance(cid, str) and not cid.startswith('https://orpheus.network/'):
                 self._json({'error': 'URL no válida'}, 400); return
-            self._json({'ok': True, 'queued': enqueue_fetch(cid)}); return
+            self._json({'ok': True, 'queued': enqueue_fetch(cid, bool(d.get('full')))}); return
 
         if path == '/api/groups':
             groups = d.get('groups')
