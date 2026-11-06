@@ -60,7 +60,7 @@ def init_db():
     )
     """)
     # Migrate existing DBs that lack the columns
-    for col in ("orpheus_group_id INTEGER", "orig_cover_url TEXT"):
+    for col in ("orpheus_group_id INTEGER", "orig_cover_url TEXT", "yt_failed INTEGER DEFAULT 0"):
         try:
             cur.execute(f"ALTER TABLE albums ADD COLUMN {col}")
             con.commit()
@@ -372,6 +372,10 @@ def musicbrainz_cover(artist, album):
 
 
 
+class YtSearchError(Exception):
+    """La búsqueda ha fallado: no significa que el disco no tenga vídeo."""
+
+
 def search_youtube(artist, album):
     query = f"{artist} - {album} full album"
 
@@ -387,19 +391,25 @@ def search_youtube(artist, album):
         "--quiet"
     ]
 
-    try:
-        # Ejecutamos el comando y capturamos la salida
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        data = json.loads(result.stdout)
+    # YouTube rechaza con 403 búsquedas sueltas al azar y yt-dlp no reintenta los 403
+    for wait in (3, 8, 20, None):
+        try:
+            # Ejecutamos el comando y capturamos la salida
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            data = json.loads(result.stdout)
+            break
+        except subprocess.CalledProcessError as e:
+            if wait is not None and "HTTP Error 403" in (e.stderr or ""):
+                time.sleep(wait)
+                continue
+            raise YtSearchError((e.stderr or str(e)).strip().splitlines()[-1]) from e
+        except Exception as e:
+            raise YtSearchError(str(e)) from e
 
-        if "entries" in data:
-            for v in data["entries"]:
-                # Verificamos si el video dura más de 20 minutos (1200 seg)
-                if v.get("duration") and v["duration"] > 1200:
-                    return f"https://www.youtube.com/watch?v={v['id']}", v["id"]
-
-    except Exception as e:
-        print(f"Error al ejecutar yt-dlp del sistema: {e}")
+    for v in data.get("entries") or []:
+        # Verificamos si el video dura más de 20 minutos (1200 seg)
+        if v and v.get("duration") and v["duration"] > 1200:
+            return f"https://www.youtube.com/watch?v={v['id']}", v["id"]
 
     return None, None
 
@@ -431,7 +441,7 @@ def get_or_create_album(artist_id, name, group_id=None):
     cur = con.cursor()
 
     cur.execute("""
-        SELECT id, youtube_url, cover_url FROM albums
+        SELECT id, youtube_url, cover_url, yt_failed FROM albums
         WHERE artist_id=? AND name=?
     """, (artist_id, name))
 
@@ -452,7 +462,7 @@ def get_or_create_album(artist_id, name, group_id=None):
     con.commit()
     album_id = cur.lastrowid
     con.close()
-    return album_id, None, None
+    return album_id, None, None, 0
 
 
 def update_cover(album_id, cover, orig=None):
@@ -463,15 +473,15 @@ def update_cover(album_id, cover, orig=None):
     con.close()
 
 
-def update_album(album_id, yt_url, yt_id, cover):
+def update_album(album_id, yt_url, yt_id, cover, failed=False):
     con = db()
     cur = con.cursor()
 
     cur.execute("""
         UPDATE albums
-        SET youtube_url=?, yt_id=?, cover_url=?
+        SET youtube_url=?, yt_id=?, cover_url=?, yt_failed=?
         WHERE id=?
-    """, (yt_url, yt_id, cover, album_id))
+    """, (yt_url, yt_id, cover, int(failed), album_id))
 
     con.commit()
     con.close()
@@ -547,7 +557,7 @@ def main():
     # Ahora que la conexión de arriba está cerrada, el bucle puede trabajar
     for a in albums:
         artist_id = get_or_create_artist(a["artist"])
-        album_id, yt, stored_cover = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
+        album_id, yt, stored_cover, yt_failed = get_or_create_album(artist_id, a["album"], group_id=a.get("group_id"))
         # Disco sin procesar todavía: nuevo o una descarga anterior se cortó antes de terminarlo
         unseen = not yt and not stored_cover
 
@@ -568,14 +578,19 @@ def main():
         if cover != stored_cover or orig:
             update_cover(album_id, cover, orig)
 
-        if not yt and (args.full or unseen):
+        if not yt and (args.full or unseen or yt_failed):
+            failed = False
             yt_url, yt_id = discogs_youtube_url(a["artist"], a["album"])
             if yt_url:
                 print(f"  ↳ Discogs video: {yt_id}")
             else:
-                yt_url, yt_id = search_youtube(a["artist"], a["album"])
+                try:
+                    yt_url, yt_id = search_youtube(a["artist"], a["album"])
+                except YtSearchError as e:
+                    yt_url, yt_id, failed = None, None, True
+                    print(f"  ↳ YouTube falló, se reintentará en la próxima actualización: {e}")
                 time.sleep(1)
-            update_album(album_id, yt_url, yt_id, a["cover"])
+            update_album(album_id, yt_url, yt_id, a["cover"], failed)
 
         # Volvemos a abrir para insertar el ranking del álbum
         with db() as con:
